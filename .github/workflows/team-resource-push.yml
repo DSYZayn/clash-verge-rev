@@ -56,14 +56,24 @@ jobs:
         env:
           WORKER_ADMIN_URL: ${{ secrets.WORKER_ADMIN_URL }}
           ADMIN_API_TOKEN: ${{ secrets.ADMIN_API_TOKEN }}
+          # Optional, only when WORKER_ADMIN_URL points at an
+          # Access-protected hostname: a Cloudflare Access service token
+          # (Zero Trust -> Access -> Service auth) lets this machine call
+          # through Access. Leave unset for the workers.dev ingress.
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: |
           set -euo pipefail
-          : "${WORKER_ADMIN_URL:?set the WORKER_ADMIN_URL secret (https://<worker>.workers.dev/v1/admin/resource)}"
+          : "${WORKER_ADMIN_URL:?set the WORKER_ADMIN_URL secret (https://<worker>.workers.dev/v1/admin/resource or the Access-protected custom-domain equivalent)}"
           : "${ADMIN_API_TOKEN:?set the ADMIN_API_TOKEN secret (same value as the Worker secret)}"
           args=(-sS -X PUT
             -H "Authorization: Bearer $ADMIN_API_TOKEN"
             -H 'Content-Type: application/yaml'
             --data-binary @upstream.yaml)
+          if [ -n "${CF_ACCESS_CLIENT_ID:-}" ]; then
+            args+=(-H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID"
+                   -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET")
+          fi
           if [ -n "${USERINFO:-}" ]; then args+=(-H "x-subscription-userinfo: $USERINFO"); fi
           if [ -n "${DISPOSITION:-}" ]; then args+=(-H "x-content-disposition: $DISPOSITION"); fi
           curl "${args[@]}" "$WORKER_ADMIN_URL"
