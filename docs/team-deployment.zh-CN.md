@@ -120,7 +120,8 @@ gh secret set UPSTREAM_SUBSCRIPTION_URL --env team-production -R DSYZayn/clash-v
 可选的客户端签名 Secrets：
 
 - `TAURI_PRIVATE_KEY`、`TAURI_KEY_PASSWORD`：Tauri updater 签名。当前团队构建关闭了
-  上游 updater artifacts，因此测试构建不要求这两个值。
+  updater artifacts 并清空了上游更新地址，因此测试构建不要求这两个值。若以后启用
+  私有自动更新，需要同时配置自己的更新地址、公钥和这两个签名 Secret。
 - `APPLE_CERTIFICATE`、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`、
   `APPLE_ID`、`APPLE_PASSWORD`、`APPLE_TEAM_ID`：macOS 正式签名/公证。
 

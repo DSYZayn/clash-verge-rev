@@ -74,11 +74,9 @@ present, the workflow regenerates
 - `TEAM_SYNC_INTERVAL_MINUTES` - optional, default `360`.
 
 Team builds merge [`src-tauri/tauri.team.conf.json`](../src-tauri/tauri.team.conf.json)
-via `--config` to disable `createUpdaterArtifacts`: the embedded updater
-endpoints point at the upstream open-source project and must not be used for a
-private distribution. Before shipping, also replace the
-`plugins.updater.endpoints` in `src-tauri/tauri.conf.json` with your own update
-feed or remove the updater entirely.
+via `--config` to disable `createUpdaterArtifacts` and clear the upstream
+updater endpoints. Add your own private updater URL and signing key to that
+team-specific merge file later if automatic updates are required.
 
 [`.github/workflows/team-worker-ci.yml`](../.github/workflows/team-worker-ci.yml)
 typechecks the Worker and runs `wrangler deploy --dry-run`. The manual
