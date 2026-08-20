@@ -13,7 +13,7 @@ const output = path.resolve(
 
 const value = (name, fallback = '') => (process.env[name] ?? fallback).trim()
 const isPlaceholder = (text) =>
-  /(?:YOUR_|REPLACE_|CHANGEME|CHANGE_ME)/i.test(text)
+  /(?:YOUR[-_]|REPLACE_|CHANGE[-_]?ME)/i.test(text)
 const required = [
   'TEAM_DOMAIN',
   'ACCESS_AUD',

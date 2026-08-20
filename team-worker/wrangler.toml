@@ -1,25 +1,38 @@
+#:schema node_modules/wrangler/config-schema.json
 name = "clash-verge-team-api"
 main = "src/index.ts"
 compatibility_date = "2026-08-20"
-workers_dev = false
+
+# The first deploy publishes a <name>.workers.dev endpoint. Add a custom
+# domain later in the Cloudflare dashboard (Worker -> Settings -> Domains &
+# Routes); dashboard-managed routes survive redeploys because this file
+# declares no routes of its own.
+workers_dev = true
+
+# Bundle the D1 schema as text so a freshly provisioned, still-empty database
+# can initialize itself on the first authenticated request.
+rules = [{ type = "Text", globs = ["**/*.sql"], fallthrough = true }]
 
 [vars]
-# Include scheme, no trailing slash.
+# Fill in these values once, commit, and push. They are public-facing
+# configuration, not secrets: TEAM_DOMAIN is your Cloudflare Access team
+# origin and ACCESS_AUD appears in every issued Access JWT.
 TEAM_DOMAIN = "https://YOUR-TEAM.cloudflareaccess.com"
 ACCESS_AUD = "YOUR_ACCESS_APPLICATION_AUD"
 DEFAULT_TEAM_NAME = "Your Team"
 CACHE_TTL_SECONDS = "300"
 
+# D1 and KV are provisioned automatically on every deploy:
+# scripts/ensure-resources.cjs finds or creates each resource by name and
+# pins the returned id into this file before wrangler uploads the Worker.
 [[d1_databases]]
 binding = "TEAM_DB"
 database_name = "clash-verge-team"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
 migrations_dir = "migrations"
 
 [[kv_namespaces]]
 binding = "RESOURCE_CACHE"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
-preview_id = "REPLACE_WITH_KV_PREVIEW_NAMESPACE_ID"
 
-# Configure outside source control:
-#   wrangler secret put UPSTREAM_SUBSCRIPTION_URL
+# The real subscription URL is a Worker secret and never enters source
+# control. Set it once in the dashboard (Worker -> Settings -> Variables and
+# Secrets) or run: npx wrangler secret put UPSTREAM_SUBSCRIPTION_URL

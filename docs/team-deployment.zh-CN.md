@@ -22,7 +22,12 @@ Cloudflare 给桌面端返回不透明 access token，并在 API 请求到达 Wo
 6. 可选的应用签名材料。没有签名材料也能生成测试安装包，但 Windows/macOS 会显示
    未签名警告，macOS 正式分发还需要 Apple Developer 证书和公证凭据。
 
-## 1. 创建 D1 与 KV
+## 1. 创建 D1 与 KV（通常可跳过）
+
+采用下文第 4 节的 **Workers Builds（连接 GitHub）** 部署时，D1 数据库和 KV
+命名空间会由 `team-worker/scripts/ensure-resources.cjs` 在首次部署时自动按名称
+创建或复用，本节操作可以跳过。只有构建身份权限不足、或想完全手工控制资源时
+才需要本节。
 
 本机登录 Cloudflare 后运行：
 
@@ -63,6 +68,20 @@ https://team-api.example.com/.well-known/oauth-authorization-server
 使用你已配置的 Casdoor 登录流程。
 
 ## 3. 填写 GitHub `team-production` Environment
+
+这个 Environment 服务两条流水线：
+
+- **Team Edition Build（客户端构建）**：只需要 `WORKER_CUSTOM_DOMAIN`（或
+  `TEAM_API_BASE_URL`）和可选的 `TEAM_*` 变量。
+- **Deploy Team Worker（Worker 兜底部署）**：只有不使用 Workers Builds 时才需要，
+  依赖 `CLOUDFLARE_ACCOUNT_ID`、`TEAM_DOMAIN`、`ACCESS_AUD`、
+  `D1_DATABASE_ID`、`KV_NAMESPACE_ID` 变量和 `CLOUDFLARE_API_TOKEN`、
+  `UPSTREAM_SUBSCRIPTION_URL` Secrets。
+
+推荐路径（Workers Builds）下，Worker 的 `TEAM_DOMAIN`/`ACCESS_AUD` 直接提交在
+`team-worker/wrangler.toml`，`UPSTREAM_SUBSCRIPTION_URL` 在 Cloudflare
+Dashboard 的 Worker Secret 中设置，D1/KV 自动创建，因此 GitHub 侧最少只需填
+`WORKER_CUSTOM_DOMAIN`。
 
 仓库已经创建 `team-production` Environment。打开：
 
@@ -128,7 +147,35 @@ gh secret set UPSTREAM_SUBSCRIPTION_URL --env team-production -R DSYZayn/clash-v
 
 ## 4. 部署 Worker
 
-打开仓库 **Actions > Deploy Team Worker > Run workflow**：
+两条路径二选一，二者操作的是同一个 Worker，互不冲突。
+
+### 4a. Workers Builds：连接 GitHub，push 即部署（推荐）
+
+1. 把 `team-worker/wrangler.toml` 中 `[vars]` 的 `TEAM_DOMAIN`、
+   `ACCESS_AUD` 换成真实值并提交。
+2. Cloudflare Dashboard → **Workers & Pages** → 新建 Worker（或打开已有的
+   `clash-verge-team-api`）→ **Settings → Builds → Connect to Git**，选择本仓库。
+3. 子项目识别参数（monorepo 必填）：
+   - Root directory：`team-worker`
+   - Build command：`npm ci`
+   - Deploy command：`npm run deploy`（非生产分支用 `npm run deploy:preview`）
+   - Production branch：你的集成分支
+4. 可选：Build watch paths 的 include 设为 `team-worker/*`，避免客户端代码
+   提交触发 Worker 重建。
+5. 首次 push 触发部署时，`ensure-resources.cjs` 自动创建/复用 D1 与 KV 并应用
+   migrations；之后每次 push 自动更新。
+6. 在 Worker 的 **Settings → Variables and Secrets** 添加 Secret
+   `UPSTREAM_SUBSCRIPTION_URL`（真实订阅 URL，只需设置一次，不会被重新部署
+   覆盖）。
+7. 在 **Settings → Domains & Routes** 绑定 `team-api.example.com` 自定义域名。
+   wrangler.toml 不声明 routes，dashboard 绑定的域名不会被后续部署冲掉。
+
+详细说明见 `team-worker/README.md`。
+
+### 4b. Deploy Team Worker Action（兜底）
+
+适合构建身份权限不足、或希望从 GitHub Secret 同步上游 URL 的场景。打开仓库
+**Actions > Deploy Team Worker > Run workflow**：
 
 - 首次部署保持 `apply_migrations=true`。
 - 保持 `sync_upstream_secret=true`，Action 会通过标准输入把 GitHub Secret 同步到
@@ -211,3 +258,13 @@ Worker 和 Access 验证通过后，打开 **Actions > Team Edition Build > Run 
   Routes Edit；若仍失败，再增加 DNS Edit。
 - 构建出的客户端显示“团队功能尚未配置”：`WORKER_CUSTOM_DOMAIN` 和
   `TEAM_API_BASE_URL` 都未在 `team-production` Environment 中设置。
+- Workers Builds 构建失败、日志提示找不到 Wrangler 配置或依赖：Root directory
+  没有设为 `team-worker`。
+- Workers Builds 部署日志报 D1/KV 权限错误：在 Dashboard 手工创建同名资源后重新
+  触发构建，或改用 4b 的 Action 路径。
+- 客户端代码的 push 也触发 Worker 重建：把 Build watch paths 的 include 设为
+  `team-worker/*`。
+- Worker 部署成功但请求持续 401，且日志提示 issuer/audience 不匹配：
+  `wrangler.toml` 里的 `TEAM_DOMAIN`/`ACCESS_AUD` 仍是占位符，或不是保护
+  当前 API 域名的那个 Access 应用的值。首次部署时 ensure 脚本会直接中止部署并
+  提示这一点。

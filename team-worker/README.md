@@ -1,46 +1,79 @@
 # Clash Verge Team Worker
 
-This Worker sits behind a Cloudflare Access self-hosted application with
-**Managed OAuth** enabled. It validates the Access JWT forwarded by Cloudflare,
-looks up the user's entitlement in D1, and proxies the managed Clash YAML
-without revealing the upstream URL to the desktop app.
+团队版 API Worker：位于 Cloudflare Access 自托管应用（Managed OAuth）之后，校验
+Cloudflare 注入的 `Cf-Access-Jwt-Assertion`，在 D1 中查询用户授权，然后把受管的
+Clash 配置发给桌面端。真实订阅 URL 只存在于 Worker Secret，客户端永远拿不到。
 
-## Recommended production deployment
+## 绑定
 
-Use the repository's **Deploy Team Worker** GitHub Action. It reads non-secret
-configuration and credentials from the `team-production` GitHub Environment,
-generates the ignored `wrangler.generated.toml`, applies migrations, deploys,
-and copies the upstream URL from a GitHub Environment Secret to a Cloudflare
-Worker Secret. See [`../docs/team-deployment.zh-CN.md`](../docs/team-deployment.zh-CN.md)
-for the complete Cloudflare Access and client-build sequence.
+| 绑定 | 类型 | 说明 |
+| --- | --- | --- |
+| `TEAM_DB` | D1 | 团队成员与审计事件，首次部署自动创建/迁移 |
+| `RESOURCE_CACHE` | KV | 上游订阅内容缓存，首次部署自动创建 |
+| `UPSTREAM_SUBSCRIPTION_URL` | Secret | 真实订阅 URL，只在 Dashboard 或 wrangler 设置 |
+| `TEAM_DOMAIN` / `ACCESS_AUD` | vars | Access 团队域名与 AUD，公开配置，直接提交在 wrangler.toml |
 
-## Local provisioning
+## 推荐部署：连接 GitHub（Workers Builds）
 
-```powershell
-wrangler d1 create clash-verge-team
-wrangler kv namespace create RESOURCE_CACHE
-wrangler kv namespace create RESOURCE_CACHE --preview
-```
+参考 NodeWarden 的做法：仓库即配置，push 即部署。
 
-Copy `.env.example` to `.env` and fill the returned IDs, `TEAM_DOMAIN`, and
-`ACCESS_AUD`. Both `.env` and the generated Wrangler config are ignored. Store
-the real resource URL as a Worker secret:
+1. 编辑本目录的 `wrangler.toml`，把 `[vars]` 里的 `TEAM_DOMAIN`、
+   `ACCESS_AUD` 占位符换成真实值并提交（这两项是公开信息，会出现在 Access
+   签发的每个 JWT 里，不属于机密）。
+2. 打开 Cloudflare Dashboard → **Workers & Pages** → 新建 Worker（或进入已有的
+   `clash-verge-team-api`）→ **Settings → Builds → Connect to Git**。
+3. 选择仓库 `DSYZayn/clash-verge-rev`。本仓库是 monorepo，**必须**把这个 Worker
+   的构建参数指向子目录：
+
+   | 设置项 | 值 |
+   | --- | --- |
+   | Root directory | `team-worker` |
+   | Build command | `npm ci` |
+   | Deploy command（生产分支） | `npm run deploy` |
+   | Deploy command（非生产分支） | `npm run deploy:preview` |
+   | Production branch | 你的集成分支（如 `main`） |
+
+4. 建议在 **Settings → Build → Build watch paths** 把 include 设为
+   `team-worker/*`，这样客户端代码的提交不会触发 Worker 重建。
+5. 之后每次向生产分支 push 都会自动构建部署。首次部署时
+   `scripts/ensure-resources.cjs` 会按名称查找或创建 D1 数据库
+   `clash-verge-team` 与 KV 命名空间 `clash-verge-team-api-resource-cache`，
+   把返回的 id 临时写进本次构建使用的 wrangler.toml，并应用全部 D1 migrations。
+   重复部署幂等，已存在的资源直接复用。
+6. 设置上游订阅 Secret（只需一次）：Worker → **Settings → Variables and
+   Secrets** → 添加 `UPSTREAM_SUBSCRIPTION_URL`，类型选 **Secret**。
+   Secret 不会被重新部署覆盖。
+7. 自定义域名：Worker → **Settings → Domains & Routes** → 添加
+   `team-api.example.com`。wrangler.toml 不声明 routes，dashboard 里绑定的域名
+   不会被后续部署冲掉。
+
+### 注意事项
+
+- 在本机跑过 `npm run deploy` 后，本地 `wrangler.toml` 会被写入真实资源 id。
+  **不要提交这个改动**：仓库里保持纯名称声明，任何账号连接仓库后才能自助开通
+  全套资源。
+- 如果 Workers Builds 的构建身份没有创建 D1/KV 的权限（部署日志报权限错误），
+  在 Dashboard 手工创建同名资源即可——下次构建会按名称复用；或者改用下方的
+  GitHub Action 兜底路径。
+- 兜底：`docs/team-deployment.zh-CN.md` 里的 **Deploy Team Worker** Action 使用
+  `team-production` Environment 中的 `CLOUDFLARE_API_TOKEN` 等资源 id 变量，
+  走 `deploy:ci` 路径，与 Workers Builds 互不冲突（同一个 Worker 名字）。
+
+## 本地开发
 
 ```powershell
 npm install
-npm run config:prepare
-npx wrangler secret put UPSTREAM_SUBSCRIPTION_URL --config wrangler.generated.toml
-npm run db:migrate:remote
-npm run deploy
+npm run dev
 ```
 
-For local development, `npx wrangler login` is used for Cloudflare
-authentication. The generated config includes `CLOUDFLARE_ACCOUNT_ID` when it
-is present in `.env`; do not put an API token in the generated file.
+本地只有 `/healthz` 可直接访问；其余端点需要 Access 注入的断言头，完整链路请用
+已部署且受 Access 保护的域名测试。本地跑 `npm run deploy` 前先 `npx wrangler
+login`，并把 `.env.example` 复制为 `.env` 填好（`.env` 已被 git 忽略）。
 
-Create an entitlement before or after the first Access login. A `pending:` key
-allows pre-provisioning by email; after the first valid Access request the
-Worker replaces it with the immutable JWT `sub`:
+## 用户授权
+
+在 **D1 → clash-verge-team → Console** 预授权用户。Worker 在用户首次成功请求时
+会把 `pending:` key 自动替换为 Access 的稳定 `sub`：
 
 ```sql
 INSERT INTO users (
@@ -52,10 +85,13 @@ INSERT INTO users (
 );
 ```
 
-The Access application must allow loopback clients and expose Managed OAuth
-discovery at `/.well-known/oauth-authorization-server`. Recommended settings:
-5–15 minute access tokens and a 7–14 day grant session.
+流量字段为 `NULL` 时客户端显示上游 `Subscription-Userinfo`；要覆盖就填字节数
+和 Unix 秒时间戳。
 
-For local development, Access does not inject its assertion. Test the deployed
-Access-protected hostname for the authentication flow; use local development
-only for type checking and non-authenticated `/healthz` work.
+## 端点
+
+| 端点 | 认证 | 说明 |
+| --- | --- | --- |
+| `GET /healthz` | 无 | 存活探测 |
+| `GET /v1/desktop/account` | Access JWT + D1 授权 | 账户与额度信息 |
+| `GET /v1/desktop/profile` | Access JWT + D1 授权 | 受管 Clash YAML（ETag/304） |

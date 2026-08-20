@@ -37,6 +37,9 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Check resource bootstrap script
+        run: node --check scripts/ensure-resources.cjs
+
       - name: Generate a test deployment config
         env:
           TEAM_DOMAIN: https://example.cloudflareaccess.com

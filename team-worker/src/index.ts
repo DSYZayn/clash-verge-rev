@@ -1,5 +1,7 @@
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose'
 
+import schemaSql from '../migrations/0001_init.sql'
+
 interface Env {
   TEAM_DB: D1Database
   RESOURCE_CACHE: KVNamespace
@@ -36,6 +38,20 @@ const json = (value: unknown, status = 200) =>
   })
 
 const normalizedIssuer = (teamDomain: string) => teamDomain.replace(/\/$/, '')
+
+// A freshly provisioned database (first deploy through a Git-connected build,
+// before migrations have ever run) has no tables yet. Run the idempotent
+// schema once per isolate so the Worker can self-heal; a failed attempt is
+// retried on the next request.
+let schemaInit: Promise<unknown> | undefined
+
+function ensureSchema(env: Env) {
+  schemaInit ??= env.TEAM_DB.exec(schemaSql).catch((error: unknown) => {
+    schemaInit = undefined
+    throw error
+  })
+  return schemaInit
+}
 
 async function authenticate(request: Request, env: Env): Promise<JWTPayload> {
   const assertion = request.headers.get('cf-access-jwt-assertion')
@@ -177,6 +193,7 @@ async function handleRequest(
   if (url.pathname === '/healthz') return json({ ok: true })
 
   const identity = await authenticate(request, env)
+  await ensureSchema(env)
   const user = await getUser(env, identity)
   requireEnabledUser(user)
 
