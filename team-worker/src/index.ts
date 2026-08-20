@@ -53,11 +53,24 @@ function ensureSchema(env: Env) {
   return schemaInit
 }
 
+const PLACEHOLDER_VALUE = /YOUR[-_]|REPLACE_|CHANGE[-_]?ME/i
+
 async function authenticate(request: Request, env: Env): Promise<JWTPayload> {
   const assertion = request.headers.get('cf-access-jwt-assertion')
   if (!assertion)
     throw new Response('Missing Cloudflare Access assertion', { status: 401 })
 
+  if (
+    !env.TEAM_DOMAIN ||
+    !env.ACCESS_AUD ||
+    PLACEHOLDER_VALUE.test(env.TEAM_DOMAIN) ||
+    PLACEHOLDER_VALUE.test(env.ACCESS_AUD)
+  ) {
+    throw new Response(
+      'Worker is not configured: set TEAM_DOMAIN and ACCESS_AUD in the dashboard',
+      { status: 503 },
+    )
+  }
   const issuer = normalizedIssuer(env.TEAM_DOMAIN)
   const jwks = createRemoteJWKSet(new URL(`${issuer}/cdn-cgi/access/certs`))
   const { payload } = await jwtVerify(assertion, jwks, {

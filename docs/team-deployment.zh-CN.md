@@ -78,10 +78,10 @@ https://team-api.example.com/.well-known/oauth-authorization-server
   `D1_DATABASE_ID`、`KV_NAMESPACE_ID` 变量和 `CLOUDFLARE_API_TOKEN`、
   `UPSTREAM_SUBSCRIPTION_URL` Secrets。
 
-推荐路径（Workers Builds）下，Worker 的 `TEAM_DOMAIN`/`ACCESS_AUD` 直接提交在
-`team-worker/wrangler.toml`，`UPSTREAM_SUBSCRIPTION_URL` 在 Cloudflare
-Dashboard 的 Worker Secret 中设置，D1/KV 自动创建，因此 GitHub 侧最少只需填
-`WORKER_CUSTOM_DOMAIN`。
+推荐路径（Workers Builds）下，`TEAM_DOMAIN`/`ACCESS_AUD`/
+`UPSTREAM_SUBSCRIPTION_URL` 都在 Cloudflare Dashboard 的 Worker 变量里管理，
+D1/KV 自动创建，因此 GitHub 侧最少只需填 `WORKER_CUSTOM_DOMAIN`（客户端构建
+用）。
 
 仓库已经创建 `team-production` Environment。打开：
 
@@ -92,8 +92,6 @@ Dashboard 的 Worker Secret 中设置，D1/KV 自动创建，因此 GitHub 侧�
 | 名称 | 示例/含义 |
 | --- | --- |
 | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare Account ID |
-| `TEAM_DOMAIN` | `https://your-team.cloudflareaccess.com` |
-| `ACCESS_AUD` | 上一步复制的 Access Application AUD |
 | `WORKER_CUSTOM_DOMAIN` | `https://team-api.example.com`，必须带 `https://` |
 | `D1_DATABASE_ID` | D1 database ID |
 | `KV_NAMESPACE_ID` | KV production namespace ID |
@@ -103,10 +101,11 @@ Dashboard 的 Worker Secret 中设置，D1/KV 自动创建，因此 GitHub 侧�
 | 名称 | 默认值/用途 |
 | --- | --- |
 | `KV_PREVIEW_NAMESPACE_ID` | 未填时使用 production KV ID |
-| `WORKER_NAME` | `clash-verge-team-api` |
+| `WORKER_NAME` | `clash-verge-rev` |
 | `D1_DATABASE_NAME` | `clash-verge-team` |
 | `DEFAULT_TEAM_NAME` | 团队显示名称 |
 | `CACHE_TTL_SECONDS` | `300` |
+| `TEAM_DOMAIN` / `ACCESS_AUD` | Worker 变量；Workers Builds 路径下在 Cloudflare dashboard 管理，无需在此填写 |
 | `TEAM_API_BASE_URL` | 可不填，默认使用 `WORKER_CUSTOM_DOMAIN` |
 | `TEAM_OAUTH_DISCOVERY_URL` | 可不填，默认使用 API 域名下的 OAuth 元数据地址 |
 | `TEAM_OAUTH_CLIENT_ID` | 保持空值即可使用动态客户端注册 |
@@ -151,27 +150,29 @@ gh secret set UPSTREAM_SUBSCRIPTION_URL --env team-production -R DSYZayn/clash-v
 
 ### 4a. Workers Builds：连接 GitHub，push 即部署（推荐）
 
-1. 把 `team-worker/wrangler.toml` 中 `[vars]` 的 `TEAM_DOMAIN`、
-   `ACCESS_AUD` 换成真实值并提交。
-2. Cloudflare Dashboard → **Workers & Pages** → 新建 Worker（或打开已有的
-   `clash-verge-team-api`）→ **Settings → Builds → Connect to Git**，选择本仓库。
-3. 子项目识别参数（monorepo 必填）：
+1. Cloudflare Dashboard → **Workers & Pages** → 新建 Worker（或打开已有的
+   `clash-verge-rev`）→ **Settings → Builds → Connect to Git**，选择本仓库。
+   注意：dashboard 里 Worker 的名字必须和 `team-worker/wrangler.toml` 的
+   `name` 一致（当前为 `clash-verge-rev`），否则部署会落到另一个 Worker 上。
+2. 子项目识别参数（monorepo 必填）：
    - Root directory：`team-worker`
    - Build command：`npm ci`
    - Deploy command：`npm run deploy`（非生产分支用 `npm run deploy:preview`）
    - Build variables：`SKIP_DEPENDENCY_INSTALL=1`（必须，原因见常见故障）
    - Production branch：你的集成分支
-4. 可选：Build watch paths 的 include 设为 `team-worker/*`，避免客户端代码
+3. 可选：Build watch paths 的 include 设为 `team-worker/*`，避免客户端代码
    提交触发 Worker 重建。
-5. 首次 push 触发部署时，`ensure-resources.cjs` 自动创建/复用 D1 与 KV 并应用
+4. 首次 push 触发部署时，`ensure-resources.cjs` 自动创建/复用 D1 与 KV 并应用
    migrations；之后每次 push 自动更新。
-6. 在 Worker 的 **Settings → Variables and Secrets** 添加 Secret
-   `UPSTREAM_SUBSCRIPTION_URL`（真实订阅 URL，只需设置一次，不会被重新部署
-   覆盖）。
-7. 在 **Settings → Domains & Routes** 绑定 `team-api.example.com` 自定义域名。
-   wrangler.toml 不声明 routes，dashboard 绑定的域名不会被后续部署冲掉。
+5. 在 Worker 的 **Settings → Variables and Secrets** 添加：
+   - `TEAM_DOMAIN`（Text）：Access 团队域名，如 `https://your-team.cloudflareaccess.com`
+   - `ACCESS_AUD`（Text）：Access 应用的 Application Audience (AUD) tag
+   - `UPSTREAM_SUBSCRIPTION_URL`（Secret）：真实订阅 URL
 
-详细说明见 `team-worker/README.md`。
+   保存后立即生效；wrangler.toml 启用了 `keep_vars`，之后每次重新部署都会
+   保留这里的最新值。
+6. 在 **Settings → Domains & Routes** 绑定 `team-api.example.com` 自定义域名。
+   wrangler.toml 不声明 routes，dashboard 绑定的域名不会被后续部署冲掉。
 
 ### 4b. Deploy Team Worker Action（兜底）
 
@@ -274,7 +275,10 @@ Worker 和 Access 验证通过后，打开 **Actions > Team Edition Build > Run 
   触发构建，或改用 4b 的 Action 路径。
 - 客户端代码的 push 也触发 Worker 重建：把 Build watch paths 的 include 设为
   `team-worker/*`。
-- Worker 部署成功但请求持续 401，且日志提示 issuer/audience 不匹配：
-  `wrangler.toml` 里的 `TEAM_DOMAIN`/`ACCESS_AUD` 仍是占位符，或不是保护
-  当前 API 域名的那个 Access 应用的值。首次部署时 ensure 脚本会直接中止部署并
-  提示这一点。
+- 请求返回 503、提示 Worker is not configured：Worker 的 Variables and
+  Secrets 里还没设置 `TEAM_DOMAIN`/`ACCESS_AUD`，或值里仍带占位符。
+- 请求持续 401、日志提示 issuer/audience 不匹配：`TEAM_DOMAIN` 必须是
+  `https://你的团队.cloudflareaccess.com`（无路径、无结尾斜杠），
+  `ACCESS_AUD` 必须是保护当前 API 域名的那个 Access 应用的 AUD tag。
+- Dashboard 里改的变量在一次 push 部署后被覆盖回旧值：确认 wrangler.toml
+  保留了 `keep_vars = true`，且 `[vars]` 里没有同名条目。

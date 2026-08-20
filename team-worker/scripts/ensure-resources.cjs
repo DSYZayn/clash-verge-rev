@@ -120,27 +120,11 @@ function ensureKv(toml, workerName) {
   return toml.replace(block, pinned)
 }
 
-function assertVarsConfigured(toml) {
-  // Plain-text vars ship in the committed wrangler.toml because every deploy
-  // replaces them. Refuse to publish a Worker that still carries placeholders.
-  const bad = [...toml.matchAll(/^\s*(TEAM_DOMAIN|ACCESS_AUD)\s*=\s*"([^"]*)"/gm)]
-    .filter((m) => /YOUR[-_]|REPLACE_|CHANGE[-_]?ME/i.test(m[2]))
-    .map((m) => m[1])
-  if (bad.length > 0) {
-    console.error(
-      `[ensure] ${bad.join(', ')} still has placeholder values in wrangler.toml.` +
-        ' Fill in the real Cloudflare Access values, commit, and redeploy.',
-    )
-    process.exit(1)
-  }
-}
-
 function main() {
   let toml = fs.readFileSync(CONFIG, 'utf8')
   const workerName =
     (toml.match(/^\s*name\s*=\s*"([^"]+)"/m) || [])[1] || 'worker'
 
-  assertVarsConfigured(toml)
   toml = ensureD1(toml)
   toml = ensureKv(toml, workerName)
   fs.writeFileSync(CONFIG, toml)

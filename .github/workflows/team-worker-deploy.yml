@@ -101,7 +101,7 @@ jobs:
           {
             echo '### Team Worker deployed'
             echo
-            echo "- Worker: ${WORKER_NAME:-clash-verge-team-api}"
+            echo "- Worker: ${WORKER_NAME:-clash-verge-rev}"
             echo "- API origin: ${WORKER_CUSTOM_DOMAIN:-workers.dev URL from the deploy log}"
             echo "- D1 migrations: ${{ inputs.apply_migrations }}"
             echo "- Upstream secret synchronized: ${{ inputs.sync_upstream_secret }}"

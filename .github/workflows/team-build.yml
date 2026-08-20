@@ -7,6 +7,11 @@ on:
       - dev
       - 'codex/**'
       - 'team/**'
+    paths-ignore:
+      - 'team-worker/**'
+      - 'docs/**'
+      - '.github/workflows/team-worker-ci.yml'
+      - '.github/workflows/team-worker-deploy.yml'
   workflow_dispatch:
     inputs:
       run_windows:

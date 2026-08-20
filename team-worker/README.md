@@ -11,19 +11,19 @@ Clash 配置发给桌面端。真实订阅 URL 只存在于 Worker Secret，客�
 | `TEAM_DB` | D1 | 团队成员与审计事件，首次部署自动创建/迁移 |
 | `RESOURCE_CACHE` | KV | 上游订阅内容缓存，首次部署自动创建 |
 | `UPSTREAM_SUBSCRIPTION_URL` | Secret | 真实订阅 URL，只在 Dashboard 或 wrangler 设置 |
-| `TEAM_DOMAIN` / `ACCESS_AUD` | vars | Access 团队域名与 AUD，公开配置，直接提交在 wrangler.toml |
+| `TEAM_DOMAIN` / `ACCESS_AUD` | vars（dashboard 管理） | Access 团队域名与 AUD；在 Worker 的 Variables and Secrets 设置，`keep_vars` 保证重新部署不覆盖 |
 
 ## 推荐部署：连接 GitHub（Workers Builds）
 
 参考 NodeWarden 的做法：仓库即配置，push 即部署。
 
-1. 编辑本目录的 `wrangler.toml`，把 `[vars]` 里的 `TEAM_DOMAIN`、
-   `ACCESS_AUD` 占位符换成真实值并提交（这两项是公开信息，会出现在 Access
-   签发的每个 JWT 里，不属于机密）。
-2. 打开 Cloudflare Dashboard → **Workers & Pages** → 新建 Worker（或进入已有的
-   `clash-verge-team-api`）→ **Settings → Builds → Connect to Git**。
-3. 选择仓库 `DSYZayn/clash-verge-rev`。本仓库是 monorepo，**必须**把这个 Worker
-   的构建参数指向子目录：
+1. 打开 Cloudflare Dashboard → **Workers & Pages** → 新建 Worker（或进入已有的
+   `clash-verge-rev`）→ **Settings → Builds → Connect to Git**。
+   注意：dashboard 里 Worker 的名字必须与本目录 wrangler.toml 的 `name`
+   完全一致（当前为 `clash-verge-rev`），否则每次部署都会落到另一个
+   同名新 Worker 上，你连接的这一个永远收不到更新。
+2. 选择仓库 `DSYZayn/clash-verge-rev`。本仓库是 monorepo，**必须**把这个
+   Worker 的构建参数指向子目录：
 
    | 设置项 | 值 |
    | --- | --- |
@@ -31,27 +31,33 @@ Clash 配置发给桌面端。真实订阅 URL 只存在于 Worker Secret，客�
    | Build command | `npm ci` |
    | Deploy command（生产分支） | `npm run deploy` |
    | Deploy command（非生产分支） | `npm run deploy:preview` |
-   | Build variables | `SKIP_DEPENDENCY_INSTALL=1`（见下方说明） |
+   | Build variables | `SKIP_DEPENDENCY_INSTALL=1` |
    | Production branch | 你的集成分支（如 `main`） |
 
-4. 建议在 **Settings → Build → Build watch paths** 把 include 设为
+   `SKIP_DEPENDENCY_INSTALL=1` 必须设置：Cloudflare 的自动依赖安装固定发生在
+   **仓库根目录**（与 Root directory 无关），会用根项目的 pnpm 安装整个桌面端
+   依赖树。跳过它之后，`team-worker` 的依赖由 Build command 里的 `npm ci`
+   自行负责。
+3. 建议在 **Settings → Build → Build watch paths** 把 include 设为
    `team-worker/*`，这样客户端代码的提交不会触发 Worker 重建。
-5. 在 **Settings → Build → Build variables and secrets** 添加
-   `SKIP_DEPENDENCY_INSTALL=1`。原因：Cloudflare 的自动依赖安装固定发生在
-   **仓库根目录**，会用根项目的 pnpm 安装整个桌面端依赖树（慢且可能失败），
-   与 Root directory 无关。跳过它之后，`team-worker` 的依赖由 Build command
-   里的 `npm ci` 自行负责。
-6. 之后每次向生产分支 push 都会自动构建部署。首次部署时
+4. 之后每次向生产分支 push 都会自动构建部署。首次部署时
    `scripts/ensure-resources.cjs` 会按名称查找或创建 D1 数据库
-   `clash-verge-team` 与 KV 命名空间 `clash-verge-team-api-resource-cache`，
+   `clash-verge-team` 与 KV 命名空间 `clash-verge-rev-resource-cache`，
    把返回的 id 临时写进本次构建使用的 wrangler.toml，并应用全部 D1 migrations。
    重复部署幂等，已存在的资源直接复用。
-7. 设置上游订阅 Secret（只需一次）：Worker → **Settings → Variables and
-   Secrets** → 添加 `UPSTREAM_SUBSCRIPTION_URL`，类型选 **Secret**。
-   Secret 不会被重新部署覆盖。
-8. 自定义域名：Worker → **Settings → Domains & Routes** → 添加
-   `team-api.example.com`。wrangler.toml 不声明 routes，dashboard 里绑定的域名
-   不会被后续部署冲掉。
+5. 在 Worker → **Settings → Variables and Secrets** 添加三个变量：
+
+   | 变量 | 类型 | 内容 |
+   | --- | --- | --- |
+   | `TEAM_DOMAIN` | Text | Access 团队域名，如 `https://your-team.cloudflareaccess.com` |
+   | `ACCESS_AUD` | Text | Access 应用的 Application Audience (AUD) tag |
+   | `UPSTREAM_SUBSCRIPTION_URL` | Secret | 真实订阅 URL |
+
+   保存后立即生效；`keep_vars` 保证之后每次 push 重新部署时都保留这里的
+   最新值。未配置时 Worker 会返回 503 提示。
+6. 自定义域名：Worker → **Settings → Domains & Routes** → 添加
+   `team-api.example.com`。wrangler.toml 不声明 routes，dashboard 里绑定的
+   域名不会被后续部署冲掉。
 
 ### 注意事项
 
@@ -61,6 +67,8 @@ Clash 配置发给桌面端。真实订阅 URL 只存在于 Worker Secret，客�
 - 如果 Workers Builds 的构建身份没有创建 D1/KV 的权限（部署日志报权限错误），
   在 Dashboard 手工创建同名资源即可——下次构建会按名称复用；或者改用下方的
   GitHub Action 兜底路径。
+- `DEFAULT_TEAM_NAME`、`CACHE_TTL_SECONDS` 仍在 wrangler.toml 的 `[vars]`
+  里管理：dashboard 里的同名变量会在下次部署时被覆盖回仓库值，要改就改仓库。
 - 兜底：`docs/team-deployment.zh-CN.md` 里的 **Deploy Team Worker** Action 使用
   `team-production` Environment 中的 `CLOUDFLARE_API_TOKEN` 等资源 id 变量，
   走 `deploy:ci` 路径，与 Workers Builds 互不冲突（同一个 Worker 名字）。
