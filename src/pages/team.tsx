@@ -41,20 +41,37 @@ const TeamPage = () => {
   const [error, setError] = useState<string>()
 
   const run = useCallback(
-    async (name: string, operation: () => Promise<unknown>) => {
+    async (name: string, operation: () => Promise<unknown>, errorPrefix = '') => {
       setAction(name)
       setError(undefined)
       try {
         await operation()
         await refetch()
       } catch (reason) {
-        setError(String(reason))
+        setError(errorPrefix + String(reason))
       } finally {
         setAction(undefined)
       }
     },
     [refetch],
   )
+
+  // 登录与同步解耦：登录成功即刷新账户页；配置同步转入后台，失败时单独提示，
+  // 不再阻塞或混淆登录结果。
+  const handleLogin = useCallback(async () => {
+    setAction('login')
+    setError(undefined)
+    try {
+      await loginTeam()
+    } catch (reason) {
+      setError(`登录失败：${String(reason)}`)
+      setAction(undefined)
+      return
+    }
+    await refetch()
+    setAction(undefined)
+    void run('sync', syncTeamProfile, '配置同步失败：')
+  }, [refetch, run])
 
   const quota = data?.account?.quota
   const used = (quota?.upload ?? 0) + (quota?.download ?? 0)
@@ -118,7 +135,7 @@ const TeamPage = () => {
                   variant="contained"
                   startIcon={action === 'login' ? <CircularProgress size={16} /> : <LoginOutlinedIcon />}
                   disabled={!data?.configured || Boolean(action)}
-                  onClick={() => run('login', loginTeam)}
+                  onClick={handleLogin}
                 >
                   浏览器登录
                 </Button>

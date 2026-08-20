@@ -23,5 +23,5 @@ pub async fn sync_team_profile() -> CmdResult<TeamStatus> {
 
 #[tauri::command]
 pub async fn logout_team() -> CmdResult {
-    team::logout().stringify_err()
+    team::logout().await.stringify_err()
 }

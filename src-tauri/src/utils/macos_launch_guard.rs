@@ -288,7 +288,7 @@ fn sibling_swap_path(destination: &Path, label: &str) -> PathBuf {
     let name = destination
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("Clash Verge.app");
+        .unwrap_or("Lab Clash Verge.app");
     destination.with_file_name(format!(".{name}.{label}-{}", std::process::id()))
 }
 
@@ -392,8 +392,8 @@ mod tests {
         let home = root.join("home");
         let system = root.join("Applications");
         let user = home.join("Applications");
-        let system_exe = executable(&system.join("Tools/Clash Verge.app"))?;
-        let user_exe = executable(&user.join("Network/Clash Verge.app"))?;
+        let system_exe = executable(&system.join("Tools/Lab Clash Verge.app"))?;
+        let user_exe = executable(&user.join("Network/Lab Clash Verge.app"))?;
 
         assert!(matches!(
             evaluate_install_location_with_roots(&system_exe, &home, &system),

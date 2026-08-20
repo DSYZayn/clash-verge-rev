@@ -156,13 +156,19 @@ pub async fn delete_profile(index: String) -> CmdResult {
             "managed profiles cannot be deleted from the profiles page",
         ));
     }
+    delete_profile_inner(&index).await
+}
+
+// Shared deletion machinery. Team logout calls this with the managed uid so
+// logout cleans up exactly like a manual subscription delete.
+pub(crate) async fn delete_profile_inner(index: &String) -> CmdResult {
     let profile_write_guard = PROFILE_WRITE_LOCK.lock().await;
 
     let profiles = Config::profiles().await;
     let result = profiles
         .with_data_modify(|mut candidate| async move {
             let original = candidate.clone();
-            let (should_update, plan) = candidate.plan_delete_item(&index)?;
+            let (should_update, plan) = candidate.plan_delete_item(index)?;
             let guard = if should_update {
                 match CoreManager::global()
                     .update_config_forced_with_profiles(&candidate, &original)

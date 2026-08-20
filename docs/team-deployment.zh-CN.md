@@ -289,7 +289,7 @@ Worker 子请求的 TLS/H2 指纹由 workerd 决定，代码层面无法伪装�
    ```
 
 推送内容在 KV 中长期保存（无 TTL），推送失败不影响客户端继续使用旧配置。
-`UPSTREAM_SUBSCRIPTION_URL` 若保留，则作为"从未推送过"时的兜底拉取路径。
+`UPSTREAM_SUBSCRIPTION_URL` 在推送链路验证通过后，建议从 Worker Secrets 中删除（缩小敏感面）：删除后即使 KV 意外清空，`/v1/desktop/profile` 也只会短暂返回 503，下一次定时推送即自动恢复。
 
 ## 5. 用户开通与管理
 

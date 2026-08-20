@@ -360,8 +360,10 @@ pub async fn login() -> Result<TeamStatus> {
         resource,
         ..TeamSession::default()
     })?;
-    refresh_account().await?;
-    sync_managed_profile().await
+    // Login ends here: the account page can refresh immediately. The frontend
+    // kicks off the profile sync in the background and reports its failures
+    // separately, so a sync error never surfaces as a login error.
+    refresh_account().await
 }
 
 async fn usable_session() -> Result<TeamSession> {
@@ -408,7 +410,22 @@ pub async fn status() -> Result<TeamStatus> {
     })
 }
 
-pub fn logout() -> Result<()> {
+pub async fn logout() -> Result<()> {
+    // Logout must behave like deleting the subscription: remove the managed
+    // profile with the same machinery. Best-effort: a cleanup failure must
+    // not trap the user in a logged-in state.
+    let managed_installed = Config::profiles()
+        .await
+        .latest_arc()
+        .get_item(MANAGED_PROFILE_UID)
+        .is_ok();
+    if managed_installed {
+        if let Err(error) =
+            crate::cmd::profile::delete_profile_inner(&MANAGED_PROFILE_UID.into()).await
+        {
+            logging!(error, Type::Cmd, "managed profile cleanup on logout failed: {error}");
+        }
+    }
     let path = session_path()?;
     if path.exists() {
         std::fs::remove_file(path)?;

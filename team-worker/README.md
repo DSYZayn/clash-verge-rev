@@ -10,7 +10,7 @@ Clash 配置发给桌面端。真实订阅 URL 只存在于 Worker Secret，客�
 | --- | --- | --- |
 | `TEAM_DB` | D1 | 团队成员与审计事件，首次部署自动创建/迁移 |
 | `RESOURCE_CACHE` | KV | 上游订阅内容缓存，首次部署自动创建 |
-| `UPSTREAM_SUBSCRIPTION_URL` | Secret | 真实订阅 URL，只在 Dashboard 或 wrangler 设置 |
+| `UPSTREAM_SUBSCRIPTION_URL` | Secret | 可选兜底：真实订阅 URL，只在 Dashboard 或 wrangler 设置；推送模式验证通过后建议删除 |
 | `TEAM_DOMAIN` / `ACCESS_AUD` | vars（dashboard 管理） | Access 团队域名与 AUD；在 Worker 的 Variables and Secrets 设置，`keep_vars` 保证重新部署不覆盖 |
 
 ## 推荐部署：连接 GitHub（Workers Builds）
