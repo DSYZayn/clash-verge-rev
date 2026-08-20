@@ -13,8 +13,8 @@ interface Env {
   RESOURCE_CACHE: KVNamespace
   TEAM_DOMAIN: string
   ACCESS_AUD: string
-  DEFAULT_TEAM_NAME: string
-  CACHE_TTL_SECONDS: string
+  DEFAULT_TEAM_NAME?: string
+  CACHE_TTL_SECONDS?: string
   UPSTREAM_SUBSCRIPTION_URL: string
 }
 
@@ -278,10 +278,16 @@ async function fetchResource(env: Env): Promise<CachedResource> {
 
   const body = await response.text()
   if (body.length > 10 * 1024 * 1024) {
+    console.error(
+      `upstream resource too large: ${body.length} bytes, host: ${upstreamHost}`,
+    )
     throw new Response('Upstream resource exceeds the 10 MiB limit', {
       status: 502,
     })
   }
+  console.log(
+    `upstream fetched: ${response.status}, ${body.length} bytes, host: ${upstreamHost}`,
+  )
   const resource: CachedResource = {
     body,
     etag: await sha256Etag(body),
@@ -357,7 +363,7 @@ async function handleRequest(
       userId: user.access_subject,
       email: user.email,
       displayName: user.display_name,
-      team: user.team_name ?? env.DEFAULT_TEAM_NAME,
+      team: user.team_name ?? env.DEFAULT_TEAM_NAME ?? 'Team',
       enabled: true,
       // A null total means quota is inherited from Subscription-Userinfo. The
       // desktop preserves its last synchronized value until /profile refreshes it.

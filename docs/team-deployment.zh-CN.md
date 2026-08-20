@@ -120,8 +120,8 @@ Environment 中精简。需要启用兜底路径时按此重建：
 | `KV_PREVIEW_NAMESPACE_ID` | 未填时使用 production KV ID |
 | `D1_DATABASE_NAME` | `clash-verge-team` |
 | `WORKER_NAME` | `clash-verge-rev`（必须与 wrangler.toml 的 name 一致） |
-| `DEFAULT_TEAM_NAME` | 团队显示名称（也可直接改 wrangler.toml） |
-| `CACHE_TTL_SECONDS` | `300`（也可直接改 wrangler.toml） |
+| `DEFAULT_TEAM_NAME` | 可选；代码内置默认值，dashboard 同名变量优先生效 |
+| `CACHE_TTL_SECONDS` | 可选；默认 `300` |
 | `TEAM_DOMAIN` / `ACCESS_AUD` | 不填则保留 dashboard 中管理的值（keep_vars） |
 
 以及 Secrets：`CLOUDFLARE_API_TOKEN`（最小权限 API Token）、
@@ -168,6 +168,7 @@ gh variable set WORKER_CUSTOM_DOMAIN --env team-production -R DSYZayn/clash-verg
    - `TEAM_DOMAIN`（Text）：Access 团队域名，如 `https://your-team.cloudflareaccess.com`
    - `ACCESS_AUD`（Text）：Access 应用的 Application Audience (AUD) tag
    - `UPSTREAM_SUBSCRIPTION_URL`（Secret）：真实订阅 URL
+   - 可选：`DEFAULT_TEAM_NAME`（Text，团队显示名）、`CACHE_TTL_SECONDS`（Text，缓存秒数）
 
    保存后立即生效；wrangler.toml 启用了 `keep_vars`，之后每次重新部署都会
    保留这里的最新值。
@@ -283,4 +284,5 @@ Worker 和 Access 验证通过后，打开 **Actions > Team Edition Build > Run 
   `https://你的团队.cloudflareaccess.com`（无路径、无结尾斜杠），
   `ACCESS_AUD` 必须是保护当前 API 域名的那个 Access 应用的 AUD tag。
 - Dashboard 里改的变量在一次 push 部署后被覆盖回旧值：确认 wrangler.toml
-  保留了 `keep_vars = true`，且 `[vars]` 里没有同名条目。
+  保留了 `keep_vars = true`，且没有重新引入 `[vars]` 同名条目（仓库默认不含
+  `[vars]`，dashboard 是所有环境变量的唯一来源）。

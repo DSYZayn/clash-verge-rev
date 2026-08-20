@@ -52,6 +52,8 @@ Clash 配置发给桌面端。真实订阅 URL 只存在于 Worker Secret，客�
    | `TEAM_DOMAIN` | Text | Access 团队域名，如 `https://your-team.cloudflareaccess.com` |
    | `ACCESS_AUD` | Text | Access 应用的 Application Audience (AUD) tag |
    | `UPSTREAM_SUBSCRIPTION_URL` | Secret | 真实订阅 URL |
+   | `DEFAULT_TEAM_NAME` | Text（可选） | 团队显示名；不填用代码默认值 |
+   | `CACHE_TTL_SECONDS` | Text（可选） | KV 缓存秒数；不填默认 300 |
 
    保存后立即生效；`keep_vars` 保证之后每次 push 重新部署时都保留这里的
    最新值。未配置时 Worker 会返回 503 提示。
@@ -67,8 +69,8 @@ Clash 配置发给桌面端。真实订阅 URL 只存在于 Worker Secret，客�
 - 如果 Workers Builds 的构建身份没有创建 D1/KV 的权限（部署日志报权限错误），
   在 Dashboard 手工创建同名资源即可——下次构建会按名称复用；或者改用下方的
   GitHub Action 兜底路径。
-- `DEFAULT_TEAM_NAME`、`CACHE_TTL_SECONDS` 仍在 wrangler.toml 的 `[vars]`
-  里管理：dashboard 里的同名变量会在下次部署时被覆盖回仓库值，要改就改仓库。
+- `DEFAULT_TEAM_NAME`、`CACHE_TTL_SECONDS` 由 dashboard 管理（可选，代码内置
+  默认值）。wrangler.toml 不含 `[vars]`，部署不会覆盖 dashboard 里的任何变量。
 - 兜底：`docs/team-deployment.zh-CN.md` 里的 **Deploy Team Worker** Action 使用
   `team-production` Environment 中的 `CLOUDFLARE_API_TOKEN` 等资源 id 变量，
   走 `deploy:ci` 路径，与 Workers Builds 互不冲突（同一个 Worker 名字）。

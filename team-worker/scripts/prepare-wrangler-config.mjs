@@ -39,8 +39,6 @@ const customDomain = isPlaceholder(customDomainValue)
 const workerName = value('WORKER_NAME', 'clash-verge-rev')
 const accountId = value('CLOUDFLARE_ACCOUNT_ID')
 const databaseName = value('D1_DATABASE_NAME', 'clash-verge-team')
-const defaultTeamName = value('DEFAULT_TEAM_NAME', 'Your Team')
-const cacheTtl = value('CACHE_TTL_SECONDS', '300')
 const previewValue = value('KV_PREVIEW_NAMESPACE_ID')
 const kvPreviewId =
   !previewValue || isPlaceholder(previewValue)
@@ -84,6 +82,15 @@ try {
 }
 
 const toml = (text) => JSON.stringify(String(text))
+const managedVars = [
+  ...(teamDomain && !isPlaceholder(teamDomain)
+    ? [`TEAM_DOMAIN = ${toml(teamDomain)}`]
+    : []),
+  ...(accessAud && !isPlaceholder(accessAud)
+    ? [`ACCESS_AUD = ${toml(accessAud)}`]
+    : []),
+]
+
 const lines = [
   `name = ${toml(workerName)}`,
   ...(accountId ? [`account_id = ${toml(accountId)}`] : []),
@@ -92,16 +99,10 @@ const lines = [
   `workers_dev = ${customDomain ? 'false' : 'true'}`,
   'keep_vars = true',
   '',
-  '[vars]',
-  ...(teamDomain && !isPlaceholder(teamDomain)
-    ? [`TEAM_DOMAIN = ${toml(teamDomain)}`]
-    : []),
-  ...(accessAud && !isPlaceholder(accessAud)
-    ? [`ACCESS_AUD = ${toml(accessAud)}`]
-    : []),
-  `DEFAULT_TEAM_NAME = ${toml(defaultTeamName)}`,
-  `CACHE_TTL_SECONDS = ${toml(cacheTtl)}`,
-  '',
+  // DEFAULT_TEAM_NAME / CACHE_TTL_SECONDS have in-code defaults and live in
+  // the dashboard; repo-managed [vars] entries would overwrite dashboard
+  // values on every deploy even with keep_vars.
+  ...(managedVars.length ? ['[vars]', ...managedVars, ''] : []),
   '[[d1_databases]]',
   'binding = "TEAM_DB"',
   `database_name = ${toml(databaseName)}`,
