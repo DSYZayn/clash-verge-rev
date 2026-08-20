@@ -255,12 +255,26 @@ async function fetchResource(env: Env): Promise<CachedResource> {
       status: 503,
     })
   }
-  const response = await fetch(env.UPSTREAM_SUBSCRIPTION_URL, {
-    redirect: 'follow',
-    headers: { 'user-agent': 'Clash-Verge-Team-Worker/0.1' },
-  })
-  if (!response.ok)
+  let upstreamHost = '(unknown)'
+  let response: Response
+  try {
+    upstreamHost = new URL(env.UPSTREAM_SUBSCRIPTION_URL).host
+    response = await fetch(env.UPSTREAM_SUBSCRIPTION_URL, {
+      redirect: 'follow',
+      // Some subscription panels only serve YAML to a recognizable client UA.
+      headers: { 'user-agent': 'clash-verge/v2.4.3' },
+    })
+  } catch (error) {
+    // Never log the full upstream URL: it embeds a secret token.
+    console.error('upstream fetch error:', describeError(error), `host: ${upstreamHost}`)
+    throw new Response('Upstream resource is unreachable', { status: 502 })
+  }
+  if (!response.ok) {
+    console.error(
+      `upstream fetch failed: ${response.status} ${response.statusText}, host: ${upstreamHost}`,
+    )
     throw new Response('Upstream resource is unavailable', { status: 502 })
+  }
 
   const body = await response.text()
   if (body.length > 10 * 1024 * 1024) {
