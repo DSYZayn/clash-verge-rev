@@ -39,6 +39,7 @@ const customDomain = isPlaceholder(customDomainValue)
   ? ''
   : customDomainValue.replace(/\/$/, '')
 const workerName = value('WORKER_NAME', 'clash-verge-team-api')
+const accountId = value('CLOUDFLARE_ACCOUNT_ID')
 const databaseName = value('D1_DATABASE_NAME', 'clash-verge-team')
 const defaultTeamName = value('DEFAULT_TEAM_NAME', 'Your Team')
 const cacheTtl = value('CACHE_TTL_SECONDS', '300')
@@ -85,6 +86,7 @@ try {
 const toml = (text) => JSON.stringify(String(text))
 const lines = [
   `name = ${toml(workerName)}`,
+  ...(accountId ? [`account_id = ${toml(accountId)}`] : []),
   'main = "src/index.ts"',
   'compatibility_date = "2026-08-20"',
   `workers_dev = ${customDomain ? 'false' : 'true'}`,

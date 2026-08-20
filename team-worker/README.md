@@ -34,6 +34,10 @@ npm run db:migrate:remote
 npm run deploy
 ```
 
+For local development, `npx wrangler login` is used for Cloudflare
+authentication. The generated config includes `CLOUDFLARE_ACCOUNT_ID` when it
+is present in `.env`; do not put an API token in the generated file.
+
 Create an entitlement before or after the first Access login. A `pending:` key
 allows pre-provisioning by email; after the first valid Access request the
 Worker replaces it with the immutable JWT `sub`:
