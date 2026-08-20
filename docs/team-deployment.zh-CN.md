@@ -58,17 +58,10 @@ GitHub Environment 生成临时配置文件。
 5. Access token lifetime 建议 5–15 分钟；Grant session duration 建议 7–14 天。
 6. 保存后复制该应用的 **Application Audience (AUD) tag**。
 
-注意 Cloudflare Managed OAuth 的元数据挂在**团队域名**下，而不是应用域名。
-应用域名的 `/.well-known/oauth-authorization-server` 只会 302 到登录页；正确的
-发现地址是：
-
-```text
-https://你的团队.cloudflareaccess.com/.well-known/oauth-authorization-server
-```
-
-这个地址必须返回包含 `authorization_endpoint`、`token_endpoint`、
-`registration_endpoint` 和 S256 PKCE 的 JSON。因此客户端构建时把
-`TEAM_OAUTH_DISCOVERY_URL` 设为该地址（见第 3 节）。
+开启 Managed OAuth 后，应用域名下的 `/.well-known/oauth-authorization-server`
+会返回包含 `authorization_endpoint`、`token_endpoint`、`registration_endpoint`
+和 S256 PKCE 的 JSON，客户端默认就从这里发现元数据，无需额外配置。如果它返回
+302 登录页而不是 JSON，说明该 Access 应用还没有开启 Managed OAuth。
 
 桌面端不直接接入 Casdoor SDK。浏览器打开 Cloudflare 的授权地址后，Access 会继续
 使用你已配置的 Casdoor 登录流程。
@@ -106,7 +99,6 @@ D1/KV 自动创建，因此 GitHub 侧最少只需填 `WORKER_CUSTOM_DOMAIN`（�
 | 名称 | 默认值/用途 |
 | --- | --- |
 | `TEAM_API_BASE_URL` | 可不填，默认使用 `WORKER_CUSTOM_DOMAIN` |
-| `TEAM_OAUTH_DISCOVERY_URL` | 填团队域名下的元数据地址：`https://你的团队.cloudflareaccess.com/.well-known/oauth-authorization-server`（已设置） |
 | `TEAM_OAUTH_CLIENT_ID` | 保持空值即可使用动态客户端注册 |
 | `TEAM_OAUTH_RESOURCE` | 可不填，默认使用 API origin |
 | `TEAM_PROFILE_NAME` | `Team Network`（已设置） |
@@ -258,14 +250,18 @@ Worker 和 Access 验证通过后，打开 **Actions > Team Edition Build > Run 
 
 - OAuth metadata 返回 404/302：Access 应用的域名或 Managed OAuth 配置不正确。
 - 客户端提示 invalid OAuth discovery metadata：应用域名下的
-  `/.well-known/oauth-authorization-server` 返回的是 302 登录页而不是 JSON。
-  确认 `TEAM_OAUTH_DISCOVERY_URL` 已指向团队域名并重新构建客户端；同时确认
-  Access 应用已在 Advanced settings 开启 Managed OAuth、动态客户端注册和
+  `/.well-known/oauth-authorization-server` 返回的是 302 登录页而不是 JSON，
+  说明该 Access 应用未开启 Managed OAuth。在 Advanced settings 开启 Managed
+  OAuth 即可，无需重新构建客户端；同时确认已开启动态客户端注册和
   Allow loopback clients，否则换 token 阶段仍会失败。
 - 动态注册失败：没有开启动态客户端注册或 Allow loopback clients。
 - Bearer 请求仍为 401：`TEAM_OAUTH_RESOURCE` 与受保护 API origin 不一致，或 token
   已过期。
-- Worker 返回 401：`TEAM_DOMAIN` 错误。
+- Worker 返回 401（Access assertion verification failed）：`TEAM_DOMAIN` 或 `ACCESS_AUD`
+  与签发 token 的 Access 应用不匹配。到 Cloudflare Dashboard 的 Worker >
+  Observability/Logs 查看 `access assertion verification failed` 的具体原因。
+- Worker 返回 503（bindings missing）：D1/KV 绑定没有生效。绑定由部署脚本自动挂接，
+  push 触发一次重新部署即可；若仍存在，检查 Worker > Settings > Bindings。
 - Worker 返回 403：D1 中没有匹配的邮箱/subject，用户被禁用，或 Casdoor 没有向
   Access 提供 email claim。
 - JWT audience 错误：`ACCESS_AUD` 不是保护当前 API 域名的那个 Access 应用 AUD。

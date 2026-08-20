@@ -39,7 +39,6 @@ before building:
 
 - `enabled`: set to `true`.
 - `api_base_url`: the Access-protected Worker custom domain.
-- `oauth_discovery_url`: the Managed OAuth discovery endpoint.
 - `oauth_client_id`: leave empty to use dynamic client registration, or set a
   registered public client ID.
 - `oauth_scopes`: leave empty for Cloudflare Managed OAuth unless the server
@@ -65,8 +64,6 @@ present, the workflow regenerates
 
 - `TEAM_API_BASE_URL` - Access-protected Worker custom domain. It defaults to
   `WORKER_CUSTOM_DOMAIN` when omitted.
-- `TEAM_OAUTH_DISCOVERY_URL` - optional; defaults to the Managed OAuth
-  discovery endpoint under `TEAM_API_BASE_URL`'s team domain.
 - `TEAM_OAUTH_CLIENT_ID` - optional; empty means dynamic client registration.
 - `TEAM_OAUTH_RESOURCE` - optional resource indicator; defaults to the API
   origin.

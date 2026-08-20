@@ -36,8 +36,6 @@ pub struct TeamConfig {
     pub enabled: bool,
     pub api_base_url: String,
     #[serde(default)]
-    pub oauth_discovery_url: String,
-    #[serde(default)]
     pub oauth_client_id: String,
     #[serde(default = "default_scopes")]
     pub oauth_scopes: Vec<String>,
@@ -207,11 +205,9 @@ fn endpoint(base: &str, path: &str) -> Result<reqwest::Url> {
 }
 
 async fn metadata(config: &TeamConfig) -> Result<OAuthMetadata> {
-    let url = if config.oauth_discovery_url.trim().is_empty() {
-        endpoint(&config.api_base_url, "/.well-known/oauth-authorization-server")?
-    } else {
-        reqwest::Url::parse(&config.oauth_discovery_url)?
-    };
+    // Managed OAuth serves the discovery document on the Access-protected
+    // application domain itself; no override is needed.
+    let url = endpoint(&config.api_base_url, "/.well-known/oauth-authorization-server")?;
     reqwest::Client::new()
         .get(url)
         .send()

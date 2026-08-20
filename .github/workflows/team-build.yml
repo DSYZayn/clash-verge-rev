@@ -126,7 +126,6 @@ jobs:
         shell: pwsh
         env:
           TEAM_API_BASE_URL: ${{ vars.TEAM_API_BASE_URL || vars.WORKER_CUSTOM_DOMAIN }}
-          TEAM_OAUTH_DISCOVERY_URL: ${{ vars.TEAM_OAUTH_DISCOVERY_URL }}
           TEAM_OAUTH_CLIENT_ID: ${{ vars.TEAM_OAUTH_CLIENT_ID }}
           TEAM_OAUTH_RESOURCE: ${{ vars.TEAM_OAUTH_RESOURCE }}
           TEAM_PROFILE_NAME: ${{ vars.TEAM_PROFILE_NAME }}
@@ -140,7 +139,6 @@ jobs:
           $config = [ordered]@{
             enabled = $true
             api_base_url = $env:TEAM_API_BASE_URL
-            oauth_discovery_url = $(if ($env:TEAM_OAUTH_DISCOVERY_URL) { $env:TEAM_OAUTH_DISCOVERY_URL } else { "$($env:TEAM_API_BASE_URL.TrimEnd('/'))/.well-known/oauth-authorization-server" })
             oauth_client_id = $env:TEAM_OAUTH_CLIENT_ID
             oauth_scopes = @()
             oauth_resource = $(if ($env:TEAM_OAUTH_RESOURCE) { $env:TEAM_OAUTH_RESOURCE } else { $env:TEAM_API_BASE_URL.TrimEnd('/') })

@@ -1,7 +1,6 @@
 {
   "enabled": false,
   "api_base_url": "https://YOUR-ACCESS-APP.example.com",
-  "oauth_discovery_url": "https://YOUR-ACCESS-APP.example.com/.well-known/oauth-authorization-server",
   "oauth_client_id": "",
   "oauth_scopes": [],
   "oauth_resource": "https://YOUR-ACCESS-APP.example.com",
