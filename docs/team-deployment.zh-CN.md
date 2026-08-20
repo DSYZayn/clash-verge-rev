@@ -212,26 +212,48 @@ Worker 子请求的 TLS/H2 指纹由 workerd 决定，代码层面无法伪装�
 与查询参数名列表，用于确认 Secret 里存的是完整订阅链接而非只有域名）。若
 `ok: true` 则说明上游已放行 Worker，无需推送模式。
 
-#### 方案 A：GitHub Actions 定时推送（推荐，无需常开机器）
+#### 方案 A：GitHub Actions + 住宅网络 self-hosted runner（推荐）
 
-工作流 `.github/workflows/team-resource-push.yml` 已随仓库提供：GitHub 托管
-runner 拉取上游并 PUT 到 Worker，可配置为每 30 分钟一次。
+工作流 `.github/workflows/team-resource-push.yml` 已随仓库提供：住宅网络机器
+上的 self-hosted runner 每 30 分钟拉取上游并 PUT 到 Worker。自托管 runner
+**不消耗 Actions 付费分钟数**，账户额度或账单问题不影响这条链路。
 
-1. 在 GitHub 仓库 → Settings → Environments → `team-production` 添加三个
+1. 准备一台住宅网络里的机器（普通家用 PC 即可，不需要常开：离线期间定时
+   任务会在 GitHub 排队，机器上线后自动补跑；KV 中保存的旧配置不受影响）。
+2. 在该机器上注册 runner：仓库 → Settings → Actions → Runners →
+   New self-hosted runner，按页面指引下载，配置时务必加上 `residential`
+   标签（工作流按此标签选 runner）：
+   - Windows（管理员 PowerShell，注册为开机自启服务）：
+
+     ```powershell
+     .\config.cmd --unattended --url https://github.com/<你的账户>/clash-verge-rev `
+       --token <页面提供的注册token> --labels residential --runasservice `
+       --windowslogonaccount "NT AUTHORITY\NETWORK SERVICE"
+     ```
+
+   - Linux：
+
+     ```bash
+     ./config.sh --url https://github.com/<你的账户>/clash-verge-rev \
+       --token <注册token> --labels residential --unattended
+     sudo ./svc.sh install runner && sudo ./svc.sh start
+     ```
+
+   私有仓库使用 self-hosted runner 是安全的；公共仓库切勿这么做（fork PR
+   可在 runner 上执行任意代码）。
+3. 在 GitHub 仓库 → Settings → Environments → `team-production` 确认三个
    Secrets：
-   - `UPSTREAM_SUBSCRIPTION_URL`：真实订阅链接
+   - `UPSTREAM_SUBSCRIPTION_URL`：真实订阅链接（已配置）
+   - `ADMIN_API_TOKEN`：与 Worker 端 Secret 相同的长随机串（已配置）
    - `WORKER_ADMIN_URL`：`https://clash-verge-rev.<子域>.workers.dev/v1/admin/resource`
      （workers.dev 地址在 Worker 概览页可见；该入口不经 Access，由
      `ADMIN_API_TOKEN` 鉴权）
-   - `ADMIN_API_TOKEN`：长随机串，与下一步 Worker 端保持一致
-2. 在 Worker 的 Variables and Secrets 添加同名 Secret `ADMIN_API_TOKEN`（相同值）。
-3. 工作流的 `workflow_dispatch` 与 `schedule` 只在**默认分支**（`dev`）上的工作流
-   文件生效：先将该文件合并到 `dev`，然后在 Actions → Team Resource Push →
-   Run workflow 手动跑一次。日志显示 `upstream HTTP status: 200` 且 PUT 返回
-   `{"ok":true,...}` 即成功，客户端随后同步即可用。
-4. 若 GitHub runner（同属机房出口）也拿不到 200，说明上游只放行住宅 IP，请改用
-   方案 B。
-5. 手动跑通后解开文件顶部的 `schedule:` 注释，启用每 30 分钟自动推送。
+4. 在 Cloudflare Worker 的 Variables and Secrets 添加 Secret
+   `ADMIN_API_TOKEN`（与上一步 GitHub 侧相同的值）。
+5. `workflow_dispatch` 与 `schedule` 只在**默认分支**（`dev`）上的工作流文件
+   生效；该文件已合并到 dev。合并后可在 Actions → Team Resource Push →
+   Run workflow 手动跑一次验证：日志显示 `upstream HTTP status: 200` 且 PUT
+   返回 `{"ok":true,...}` 即成功，客户端随后同步即可用。
 
 #### 方案 B：住宅 IP 机器定时推送
 
