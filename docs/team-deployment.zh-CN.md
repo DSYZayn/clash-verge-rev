@@ -11,7 +11,7 @@ Cloudflare 给桌面端返回不透明 access token，并在 API 请求到达 Wo
 ## 需要提前准备
 
 1. 一个已接入 Cloudflare 的域名，以及准备用作 API 的子域名，例如
-   `clash-sub.dongsy.com.cn`。
+   `clash-sub.example.com`。
 2. Cloudflare Zero Trust team domain，例如
    `https://your-team.cloudflareaccess.com`。
 3. 现有 Casdoor 身份源，以及准备允许登录的邮箱或用户组。
@@ -50,7 +50,7 @@ GitHub Environment 生成临时配置文件。
 在 **Zero Trust > Access controls > Applications** 中创建或编辑一个
 **Self-hosted** 应用：
 
-1. Application domain 填 API 子域名，例如 `clash-sub.dongsy.com.cn`。
+1. Application domain 填 API 子域名，例如 `clash-sub.example.com`。
 2. 保留 Casdoor 作为身份提供方，添加 Allow policy，按邮箱或 Casdoor 用户组放行。
    不要为整个域名设置 Bypass policy。
 3. 在 **Advanced settings** 开启 **Managed OAuth**。
@@ -92,7 +92,7 @@ D1/KV 自动创建，因此 GitHub 侧最少只需填 `WORKER_CUSTOM_DOMAIN`（�
 
 | 名称 | 示例/含义 |
 | --- | --- |
-| `WORKER_CUSTOM_DOMAIN` | `https://clash-sub.dongsy.com.cn`，必须带 `https://`；客户端的 `api_base_url` 由它生成 |
+| `WORKER_CUSTOM_DOMAIN` | `https://clash-sub.example.com`，必须带 `https://`；客户端的 `api_base_url` 由它生成 |
 
 可选：
 
@@ -173,7 +173,7 @@ gh variable set WORKER_CUSTOM_DOMAIN --env team-production -R DSYZayn/clash-verg
 
    保存后立即生效；wrangler.toml 启用了 `keep_vars`，之后每次重新部署都会
    保留这里的最新值。
-6. 在 **Settings → Domains & Routes** 绑定 `clash-sub.dongsy.com.cn` 自定义域名。
+6. 在 **Settings → Domains & Routes** 绑定 `clash-sub.example.com` 自定义域名。
    wrangler.toml 不声明 routes，dashboard 绑定的域名不会被后续部署冲掉。
 
 ### 4b. Deploy Team Worker Action（兜底）
@@ -207,7 +207,7 @@ Worker 子请求的 TLS/H2 指纹由 workerd 决定，代码层面无法伪装�
 完全无感知。
 
 **先确诊，再启用**：在已登录浏览器打开
-`https://clash-sub.dongsy.com.cn/debug/upstream`，返回 `ok: false` 且
+`https://clash-sub.example.com/debug/upstream`，返回 `ok: false` 且
 `bodySnippet` 是 Cloudflare 拦截页即确诊（该探针同时返回 `urlCheck`，含路径长度
 与查询参数名列表，用于确认 Secret 里存的是完整订阅链接而非只有域名）。若
 `ok: true` 则说明上游已放行 Worker，无需推送模式。
@@ -246,7 +246,7 @@ Worker 子请求的 TLS/H2 指纹由 workerd 决定，代码层面无法伪装�
    - `UPSTREAM_SUBSCRIPTION_URL`：真实订阅链接（已配置）
    - `ADMIN_API_TOKEN`：与 Worker 端 Secret 相同的长随机串（已配置）
    - `WORKER_ADMIN_URL`：推送地址（已配置为
-     `https://clash-sub.dongsy.com.cn/v1/admin/resource`）
+     `https://clash-sub.example.com/v1/admin/resource`）
    - `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET`：Access service
      token（见下一步；推送地址走 Access 保护的域名时必须）
 4. 自定义域名整体在 Access 保护之下（实测无凭证 PUT 直接被 Access 以 401
@@ -259,7 +259,7 @@ Worker 子请求的 TLS/H2 指纹由 workerd 决定，代码层面无法伪装�
    （备选：若账户未对 `*.workers.dev` 启用 Access，可把 `WORKER_ADMIN_URL`
    改为 `https://clash-verge-rev.<子域>.workers.dev/v1/admin/resource`，
    此时无需 service token，仅由 `ADMIN_API_TOKEN` 守门。但注意 workers.dev
-   整体被 GFW DNS 污染（实测 `clash-verge-rev.dongsy2003.workers.dev`
+   整体被 GFW DNS 污染（实测 `clash-verge-rev.<your-subdomain>.workers.dev`
    解析到 31.13.94.10 这类伪造地址，TCP 连接直接失败），大陆住宅网络的
    runner 无法直连——这种网络环境下只能用上面的自定义域名方案。）
 5. 在 Cloudflare Worker 的 Variables and Secrets 添加 Secret
