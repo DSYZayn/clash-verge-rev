@@ -69,9 +69,10 @@ Real deployment values do not belong in git. Instead of editing
 - `TEAM_PROFILE_NAME` - optional display name of the managed profile.
 - `TEAM_SYNC_INTERVAL_MINUTES` - optional, default `360`.
 
-Team builds disable `createUpdaterArtifacts` through a `--config` override: the
-embedded updater endpoints point at the upstream open-source project and must
-not be used for a private distribution. Before shipping, also replace the
+Team builds merge [`src-tauri/tauri.team.conf.json`](../src-tauri/tauri.team.conf.json)
+via `--config` to disable `createUpdaterArtifacts`: the embedded updater
+endpoints point at the upstream open-source project and must not be used for a
+private distribution. Before shipping, also replace the
 `plugins.updater.endpoints` in `src-tauri/tauri.conf.json` with your own update
 feed or remove the updater entirely.
 

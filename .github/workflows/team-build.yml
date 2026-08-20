@@ -159,8 +159,11 @@ jobs:
           rustup target add ${{ matrix.target }} --toolchain 1.95.0 || rustup target add ${{ matrix.target }}
           rustup target list --installed
 
-      # Updater artifacts are disabled for team builds: the embedded updater
-      # endpoints point at the upstream project and must not be used here.
+      # Updater artifacts are disabled for team builds via the config merge
+      # file src-tauri/tauri.team.conf.json: the embedded updater endpoints
+      # point at the upstream project and must not be used here. Passing
+      # inline --config JSON through tauri-action is unreliable across
+      # shells, so a file path is used instead.
       - name: Tauri build
         if: *selected
         uses: tauri-apps/tauri-action@v1
@@ -171,7 +174,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
         with:
           tauriScript: pnpm
-          args: --target ${{ matrix.target }} -b ${{ matrix.bundle }} --config "{\"bundle\":{\"createUpdaterArtifacts\":false}}"
+          args: --target ${{ matrix.target }} -b ${{ matrix.bundle }} --config src-tauri/tauri.team.conf.json
 
       - name: Upload Artifacts (Windows)
         if: matrix.os == 'windows-latest' && (github.event_name != 'workflow_dispatch' || github.event.inputs[matrix.input] == 'true')
