@@ -87,50 +87,52 @@ D1/KV 自动创建，因此 GitHub 侧最少只需填 `WORKER_CUSTOM_DOMAIN`（�
 
 **Settings > Environments > team-production > Environment variables / secrets**
 
-必须填写的 Variables：
+### 客户端构建（Team Edition Build）
+
+必须填写：
 
 | 名称 | 示例/含义 |
 | --- | --- |
-| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare Account ID |
-| `WORKER_CUSTOM_DOMAIN` | `https://team-api.example.com`，必须带 `https://` |
-| `D1_DATABASE_ID` | D1 database ID |
-| `KV_NAMESPACE_ID` | KV production namespace ID |
+| `WORKER_CUSTOM_DOMAIN` | `https://team-api.example.com`，必须带 `https://`；客户端的 `api_base_url` 由它生成 |
 
-建议或可选的 Variables：
+可选：
 
 | 名称 | 默认值/用途 |
 | --- | --- |
-| `KV_PREVIEW_NAMESPACE_ID` | 未填时使用 production KV ID |
-| `WORKER_NAME` | `clash-verge-rev` |
-| `D1_DATABASE_NAME` | `clash-verge-team` |
-| `DEFAULT_TEAM_NAME` | 团队显示名称 |
-| `CACHE_TTL_SECONDS` | `300` |
-| `TEAM_DOMAIN` / `ACCESS_AUD` | Worker 变量；Workers Builds 路径下在 Cloudflare dashboard 管理，无需在此填写 |
 | `TEAM_API_BASE_URL` | 可不填，默认使用 `WORKER_CUSTOM_DOMAIN` |
 | `TEAM_OAUTH_DISCOVERY_URL` | 可不填，默认使用 API 域名下的 OAuth 元数据地址 |
 | `TEAM_OAUTH_CLIENT_ID` | 保持空值即可使用动态客户端注册 |
 | `TEAM_OAUTH_RESOURCE` | 可不填，默认使用 API origin |
-| `TEAM_PROFILE_NAME` | `Team Network` |
-| `TEAM_SYNC_INTERVAL_MINUTES` | `360` |
+| `TEAM_PROFILE_NAME` | `Team Network`（已设置） |
+| `TEAM_SYNC_INTERVAL_MINUTES` | `360`（已设置） |
 
-必须填写的 Secrets：
+当前 Environment 已按此精简：仅保留 `TEAM_PROFILE_NAME` 和
+`TEAM_SYNC_INTERVAL_MINUTES`，其余按需添加。
 
-| 名称 | 内容 |
+### Worker 兜底部署（Deploy Team Worker Action）
+
+以下条目只服务 4b 的兜底 Action，Workers Builds 主路径下用不到，已从
+Environment 中精简。需要启用兜底路径时按此重建：
+
+| 名称 | 示例/含义 |
 | --- | --- |
-| `CLOUDFLARE_API_TOKEN` | 上面创建的最小权限 Cloudflare API Token |
-| `UPSTREAM_SUBSCRIPTION_URL` | 真实订阅 URL |
+| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare Account ID |
+| `D1_DATABASE_ID` | D1 database ID |
+| `KV_NAMESPACE_ID` | KV production namespace ID |
+| `KV_PREVIEW_NAMESPACE_ID` | 未填时使用 production KV ID |
+| `D1_DATABASE_NAME` | `clash-verge-team` |
+| `WORKER_NAME` | `clash-verge-rev`（必须与 wrangler.toml 的 name 一致） |
+| `DEFAULT_TEAM_NAME` | 团队显示名称（也可直接改 wrangler.toml） |
+| `CACHE_TTL_SECONDS` | `300`（也可直接改 wrangler.toml） |
+| `TEAM_DOMAIN` / `ACCESS_AUD` | 不填则保留 dashboard 中管理的值（keep_vars） |
 
-也可以用已登录的 GitHub CLI 写入，命令会交互式读取 Secret，不会将值写入仓库：
+以及 Secrets：`CLOUDFLARE_API_TOKEN`（最小权限 API Token）、
+`UPSTREAM_SUBSCRIPTION_URL`（真实订阅 URL，Action 会同步为 Worker Secret）。
+
+可以用已登录的 GitHub CLI 写入客户端构建必需的变量：
 
 ```powershell
-gh variable set TEAM_DOMAIN --env team-production -R DSYZayn/clash-verge-rev
-gh variable set ACCESS_AUD --env team-production -R DSYZayn/clash-verge-rev
 gh variable set WORKER_CUSTOM_DOMAIN --env team-production -R DSYZayn/clash-verge-rev
-gh variable set CLOUDFLARE_ACCOUNT_ID --env team-production -R DSYZayn/clash-verge-rev
-gh variable set D1_DATABASE_ID --env team-production -R DSYZayn/clash-verge-rev
-gh variable set KV_NAMESPACE_ID --env team-production -R DSYZayn/clash-verge-rev
-gh secret set CLOUDFLARE_API_TOKEN --env team-production -R DSYZayn/clash-verge-rev
-gh secret set UPSTREAM_SUBSCRIPTION_URL --env team-production -R DSYZayn/clash-verge-rev
 ```
 
 `GITHUB_TOKEN` 由 GitHub Actions 自动生成，不需要准备。
@@ -176,7 +178,8 @@ gh secret set UPSTREAM_SUBSCRIPTION_URL --env team-production -R DSYZayn/clash-v
 
 ### 4b. Deploy Team Worker Action（兜底）
 
-适合构建身份权限不足、或希望从 GitHub Secret 同步上游 URL 的场景。打开仓库
+适合构建身份权限不足、或希望从 GitHub Secret 同步上游 URL 的场景。该路径所需的 Environment 变量已按客户端构建精简，
+首次使用前按第 3 节"Worker 兜底部署"表格重建。打开仓库
 **Actions > Deploy Team Worker > Run workflow**：
 
 - 首次部署保持 `apply_migrations=true`。

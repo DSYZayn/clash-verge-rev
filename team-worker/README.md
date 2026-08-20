@@ -72,6 +72,7 @@ Clash 配置发给桌面端。真实订阅 URL 只存在于 Worker Secret，客�
 - 兜底：`docs/team-deployment.zh-CN.md` 里的 **Deploy Team Worker** Action 使用
   `team-production` Environment 中的 `CLOUDFLARE_API_TOKEN` 等资源 id 变量，
   走 `deploy:ci` 路径，与 Workers Builds 互不冲突（同一个 Worker 名字）。
+  该路径所需的 GitHub Environment 变量已精简，启用前按部署文档第 3 节重建。
 
 ## 本地开发
 
