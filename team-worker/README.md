@@ -31,19 +31,25 @@ Clash 配置发给桌面端。真实订阅 URL 只存在于 Worker Secret，客�
    | Build command | `npm ci` |
    | Deploy command（生产分支） | `npm run deploy` |
    | Deploy command（非生产分支） | `npm run deploy:preview` |
+   | Build variables | `SKIP_DEPENDENCY_INSTALL=1`（见下方说明） |
    | Production branch | 你的集成分支（如 `main`） |
 
 4. 建议在 **Settings → Build → Build watch paths** 把 include 设为
    `team-worker/*`，这样客户端代码的提交不会触发 Worker 重建。
-5. 之后每次向生产分支 push 都会自动构建部署。首次部署时
+5. 在 **Settings → Build → Build variables and secrets** 添加
+   `SKIP_DEPENDENCY_INSTALL=1`。原因：Cloudflare 的自动依赖安装固定发生在
+   **仓库根目录**，会用根项目的 pnpm 安装整个桌面端依赖树（慢且可能失败），
+   与 Root directory 无关。跳过它之后，`team-worker` 的依赖由 Build command
+   里的 `npm ci` 自行负责。
+6. 之后每次向生产分支 push 都会自动构建部署。首次部署时
    `scripts/ensure-resources.cjs` 会按名称查找或创建 D1 数据库
    `clash-verge-team` 与 KV 命名空间 `clash-verge-team-api-resource-cache`，
    把返回的 id 临时写进本次构建使用的 wrangler.toml，并应用全部 D1 migrations。
    重复部署幂等，已存在的资源直接复用。
-6. 设置上游订阅 Secret（只需一次）：Worker → **Settings → Variables and
+7. 设置上游订阅 Secret（只需一次）：Worker → **Settings → Variables and
    Secrets** → 添加 `UPSTREAM_SUBSCRIPTION_URL`，类型选 **Secret**。
    Secret 不会被重新部署覆盖。
-7. 自定义域名：Worker → **Settings → Domains & Routes** → 添加
+8. 自定义域名：Worker → **Settings → Domains & Routes** → 添加
    `team-api.example.com`。wrangler.toml 不声明 routes，dashboard 里绑定的域名
    不会被后续部署冲掉。
 

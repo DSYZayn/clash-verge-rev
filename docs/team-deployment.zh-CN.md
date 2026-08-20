@@ -159,6 +159,7 @@ gh secret set UPSTREAM_SUBSCRIPTION_URL --env team-production -R DSYZayn/clash-v
    - Root directory：`team-worker`
    - Build command：`npm ci`
    - Deploy command：`npm run deploy`（非生产分支用 `npm run deploy:preview`）
+   - Build variables：`SKIP_DEPENDENCY_INSTALL=1`（必须，原因见常见故障）
    - Production branch：你的集成分支
 4. 可选：Build watch paths 的 include 设为 `team-worker/*`，避免客户端代码
    提交触发 Worker 重建。
@@ -260,6 +261,15 @@ Worker 和 Access 验证通过后，打开 **Actions > Team Edition Build > Run 
   `TEAM_API_BASE_URL` 都未在 `team-production` Environment 中设置。
 - Workers Builds 构建失败、日志提示找不到 Wrangler 配置或依赖：Root directory
   没有设为 `team-worker`。
+- Workers Builds 报 `No preset version installed for command pnpm`：仓库根目录
+  `.tool-versions` 钉住了构建镜像未预装的 Node 版本。仓库已改为
+  `nodejs 24.18.0`（镜像预装 22.23.2 / 24.18.0）；若 Cloudflare 以后更新镜像
+  预装版本，需要同步调整这个文件。
+- Workers Builds 日志出现 `pnpm install --frozen-lockfile` 且失败或极慢：
+  Cloudflare 的自动依赖安装固定发生在仓库根目录（与 Root directory 无关），会
+  拉起整个桌面端的 pnpm 依赖树。在 **Settings → Build → Build variables and
+  secrets** 加 `SKIP_DEPENDENCY_INSTALL=1` 跳过它；`team-worker` 的依赖由
+  Build command 里的 `npm ci` 负责。
 - Workers Builds 部署日志报 D1/KV 权限错误：在 Dashboard 手工创建同名资源后重新
   触发构建，或改用 4b 的 Action 路径。
 - 客户端代码的 push 也触发 Worker 重建：把 Build watch paths 的 include 设为
