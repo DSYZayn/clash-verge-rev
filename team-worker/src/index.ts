@@ -37,6 +37,19 @@ const json = (value: unknown, status = 200) =>
     headers: { 'cache-control': 'private, no-store' },
   })
 
+// D1 and jose errors hide the actionable detail in `cause`; unwrap it so
+// the Worker logs show the real reason instead of an empty message.
+function describeError(error: unknown, depth = 0): string {
+  if (depth > 3) return '...'
+  if (error instanceof Error) {
+    const base = `${error.name}: ${error.message}`
+    return error.cause === undefined
+      ? base
+      : `${base} <- ${describeError(error.cause, depth + 1)}`
+  }
+  return String(error)
+}
+
 const normalizedIssuer = (teamDomain: string) => teamDomain.replace(/\/$/, '')
 
 // A freshly provisioned database (first deploy through a Git-connected build,
@@ -45,30 +58,40 @@ const normalizedIssuer = (teamDomain: string) => teamDomain.replace(/\/$/, '')
 // retried on the next request.
 let schemaInit: Promise<unknown> | undefined
 
+async function healUsersTable(env: Env) {
+  // Self-heal databases whose users table predates the current schema:
+  // CREATE TABLE IF NOT EXISTS cannot retrofit missing columns.
+  const { results } = await env.TEAM_DB.prepare(
+    'PRAGMA table_info(users)',
+  ).all<{ name: string }>()
+  const existing = new Set(results.map((row) => row.name))
+  const columns: Array<[string, string]> = [
+    ['email', 'TEXT'],
+    ['display_name', 'TEXT'],
+    ['team_name', 'TEXT'],
+    ['enabled', 'INTEGER NOT NULL DEFAULT 1'],
+    ['quota_upload', 'INTEGER'],
+    ['quota_download', 'INTEGER'],
+    ['quota_total', 'INTEGER'],
+    ['quota_expire', 'INTEGER'],
+    ['created_at', 'TEXT'],
+    ['updated_at', 'TEXT'],
+  ]
+  for (const [name, type] of columns) {
+    if (!existing.has(name))
+      await env.TEAM_DB.exec(`ALTER TABLE users ADD COLUMN ${name} ${type}`)
+  }
+}
+
 function ensureSchema(env: Env) {
   schemaInit ??= (async () => {
     await env.TEAM_DB.exec(schemaSql)
-    // Self-heal databases whose users table predates the current schema:
-    // CREATE TABLE IF NOT EXISTS cannot retrofit missing columns.
-    const { results } = await env.TEAM_DB.prepare(
-      'PRAGMA table_info(users)',
-    ).all<{ name: string }>()
-    const existing = new Set(results.map((row) => row.name))
-    const columns: Array<[string, string]> = [
-      ['email', 'TEXT'],
-      ['display_name', 'TEXT'],
-      ['team_name', 'TEXT'],
-      ['enabled', 'INTEGER NOT NULL DEFAULT 1'],
-      ['quota_upload', 'INTEGER'],
-      ['quota_download', 'INTEGER'],
-      ['quota_total', 'INTEGER'],
-      ['quota_expire', 'INTEGER'],
-      ['created_at', 'TEXT'],
-      ['updated_at', 'TEXT'],
-    ]
-    for (const [name, type] of columns) {
-      if (!existing.has(name))
-        await env.TEAM_DB.exec(`ALTER TABLE users ADD COLUMN ${name} ${type}`)
+    try {
+      await healUsersTable(env)
+    } catch (error) {
+      // Advisory only: schemaSql is the authoritative shape. If a stale
+      // table cannot be retrofitted, later queries surface the real gap.
+      console.error('schema self-heal failed:', describeError(error))
     }
   })().catch((error: unknown) => {
     schemaInit = undefined
@@ -112,7 +135,7 @@ async function authenticate(request: Request, env: Env): Promise<JWTPayload> {
     // Verification failures (aud/issuer mismatch, unreachable JWKS, malformed
     // TEAM_DOMAIN) must surface as a diagnosable 401 in the Worker logs, not
     // as an opaque 500 from the catch-all handler.
-    console.error('access assertion verification failed:', error)
+    console.error('access assertion verification failed:', describeError(error))
     throw new Response('Access assertion verification failed', { status: 401 })
   }
 }
@@ -256,14 +279,14 @@ async function handleRequest(
   try {
     await ensureSchema(env)
   } catch (error) {
-    console.error('database schema init failed:', error)
+    console.error('database schema init failed:', describeError(error))
     return json({ error: 'Database schema initialization failed' }, 560)
   }
   let user: UserRow | null
   try {
     user = await getUser(env, identity)
   } catch (error) {
-    console.error('user lookup failed:', error)
+    console.error('user lookup failed:', describeError(error))
     return json({ error: 'User lookup failed' }, 561)
   }
   requireEnabledUser(user)
@@ -320,7 +343,7 @@ export default {
       return await handleRequest(request, env, ctx)
     } catch (error) {
       if (error instanceof Response) return error
-      console.error(error)
+      console.error('unhandled error:', describeError(error))
       return json({ error: 'Internal server error' }, 500)
     }
   },
