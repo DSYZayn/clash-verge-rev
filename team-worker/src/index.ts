@@ -375,51 +375,6 @@ async function handleRequest(
   const url = new URL(request.url)
   if (url.pathname === '/healthz') return json({ ok: true })
 
-  // TEMPORARY diagnostics: runs the D1 schema init without auth so remote
-  // failures can be measured directly. Removed once the root cause is fixed.
-  if (url.pathname === '/debug/schema-init') {
-    try {
-      await ensureSchema(env)
-      return json({ ok: true })
-    } catch (error) {
-      return json({ ok: false, error: describeError(error) }, 560)
-    }
-  }
-
-  // TEMPORARY diagnostics: probes the upstream from the Worker egress and
-  // returns the outcome (status, WAF page snippet) directly. Removed with
-  // /debug/schema-init once the push path is verified.
-  if (url.pathname === '/debug/upstream') {
-    if (!env.UPSTREAM_SUBSCRIPTION_URL)
-      return json({ ok: false, error: 'UPSTREAM_SUBSCRIPTION_URL is not set' })
-    try {
-      const upstream = new URL(env.UPSTREAM_SUBSCRIPTION_URL)
-      const response = await fetch(upstream, {
-        redirect: 'follow',
-        cf: { cacheTtl: 0 },
-        headers: { 'user-agent': 'clash-verge/v2.4.3' },
-      })
-      const snippet = (await response.text()).slice(0, 300)
-      return json({
-        ok: response.ok,
-        status: response.status,
-        server: response.headers.get('server'),
-        cfRay: response.headers.get('cf-ray'),
-        subscriptionUserinfo: response.headers.get('subscription-userinfo'),
-        // Confirms the stored secret holds the full URL (path + query) without
-        // exposing it: parameter names only, never values.
-        urlCheck: {
-          host: upstream.host,
-          pathLength: upstream.pathname.length,
-          queryParams: [...upstream.searchParams.keys()],
-        },
-        bodySnippet: snippet,
-      })
-    } catch (error) {
-      return json({ ok: false, error: describeError(error) })
-    }
-  }
-
   const bindings = env as Partial<Env>
   if (!bindings.TEAM_DB || !bindings.RESOURCE_CACHE)
     return json(
