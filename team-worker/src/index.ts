@@ -270,8 +270,11 @@ async function fetchResource(env: Env): Promise<CachedResource> {
     throw new Response('Upstream resource is unreachable', { status: 502 })
   }
   if (!response.ok) {
+    // The error page identifies the blocker: a Cloudflare WAF challenge
+    // (Error 1020) reads differently from a panel-generated token error.
+    const snippet = (await response.text().catch(() => '')).slice(0, 300)
     console.error(
-      `upstream fetch failed: ${response.status} ${response.statusText}, host: ${upstreamHost}`,
+      `upstream fetch failed: ${response.status} ${response.statusText}, host: ${upstreamHost}, server: ${response.headers.get('server') ?? '(none)'}, cf-ray: ${response.headers.get('cf-ray') ?? '(none)'}, body: ${snippet}`,
     )
     throw new Response('Upstream resource is unavailable', { status: 502 })
   }
