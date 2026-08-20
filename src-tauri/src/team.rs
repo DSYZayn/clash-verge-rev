@@ -56,12 +56,7 @@ pub struct TeamConfig {
 }
 
 fn default_scopes() -> Vec<String> {
-    vec![
-        "openid".into(),
-        "profile".into(),
-        "email".into(),
-        "offline_access".into(),
-    ]
+    Vec::new()
 }
 fn default_account_path() -> String {
     "/v1/desktop/account".into()
@@ -227,7 +222,7 @@ async fn metadata(config: &TeamConfig) -> Result<OAuthMetadata> {
         .context("invalid OAuth discovery metadata")
 }
 
-async fn register_client(metadata: &OAuthMetadata, redirect_uri: &str) -> Result<String> {
+async fn register_client(metadata: &OAuthMetadata, redirect_uri: &str, resource: &str) -> Result<String> {
     let registration_endpoint = metadata
         .registration_endpoint
         .as_ref()
@@ -237,9 +232,10 @@ async fn register_client(metadata: &OAuthMetadata, redirect_uri: &str) -> Result
         .json(&serde_json::json!({
             "client_name": "Clash Verge Team Desktop",
             "redirect_uris": [redirect_uri],
-            "grant_types": ["authorization_code", "refresh_token"],
+            "grant_types": ["authorization_code"],
             "response_types": ["code"],
-            "token_endpoint_auth_method": "none"
+            "token_endpoint_auth_method": "none",
+            "resource": resource
         }))
         .send()
         .await?
@@ -251,6 +247,10 @@ fn random_urlsafe(byte_count: usize) -> Result<String> {
     let mut bytes = vec![0_u8; byte_count];
     getrandom::fill(&mut bytes)?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn pkce_challenge(verifier: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
 async fn receive_authorization_code(listener: TcpListener, expected_state: &str) -> Result<String> {
@@ -295,14 +295,31 @@ pub async fn login() -> Result<TeamStatus> {
     let metadata = metadata(&config).await?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let redirect_uri = format!("http://127.0.0.1:{}/oauth/callback", listener.local_addr()?.port());
+    let resource = if config.oauth_resource.trim().is_empty() {
+        config.api_base_url.trim_end_matches('/').to_owned()
+    } else {
+        config.oauth_resource.trim_end_matches('/').to_owned()
+    };
     let client_id = if config.oauth_client_id.trim().is_empty() {
-        register_client(&metadata, &redirect_uri).await?
+        register_client(&metadata, &redirect_uri, &resource).await?
     } else {
         config.oauth_client_id.clone()
     };
 
-    let verifier = random_urlsafe(48)?;
-    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    // Cloudflare Access currently rejects a challenge beginning with '-' or '_'
+    // in some authorization URLs. Regenerate until the S256 challenge starts
+    // with an alphanumeric character.
+    let (verifier, challenge) = loop {
+        let candidate = random_urlsafe(48)?;
+        let candidate_challenge = pkce_challenge(&candidate);
+        if candidate_challenge
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        {
+            break (candidate, candidate_challenge);
+        }
+    };
     let state = random_urlsafe(24)?;
     let mut authorization_url = reqwest::Url::parse(&metadata.authorization_endpoint)?;
     {
@@ -311,13 +328,13 @@ pub async fn login() -> Result<TeamStatus> {
             .append_pair("response_type", "code")
             .append_pair("client_id", &client_id)
             .append_pair("redirect_uri", &redirect_uri)
-            .append_pair("scope", &config.oauth_scopes.join(" "))
             .append_pair("state", &state)
             .append_pair("code_challenge", &challenge)
             .append_pair("code_challenge_method", "S256");
-        if !config.oauth_resource.trim().is_empty() {
-            query.append_pair("resource", &config.oauth_resource);
+        if !config.oauth_scopes.is_empty() {
+            query.append_pair("scope", &config.oauth_scopes.join(" "));
         }
+        query.append_pair("resource", &resource);
     }
     open::that(authorization_url.as_str())?;
     let code = receive_authorization_code(listener, &state).await?;
@@ -328,9 +345,7 @@ pub async fn login() -> Result<TeamStatus> {
         ("redirect_uri", redirect_uri.as_str()),
         ("code_verifier", verifier.as_str()),
     ];
-    if !config.oauth_resource.trim().is_empty() {
-        token_form.push(("resource", config.oauth_resource.as_str()));
-    }
+    token_form.push(("resource", resource.as_str()));
     let token = reqwest::Client::new()
         .post(&metadata.token_endpoint)
         .form(&token_form)
@@ -346,7 +361,7 @@ pub async fn login() -> Result<TeamStatus> {
         expires_at: now().saturating_add(token.expires_in),
         client_id,
         token_endpoint: metadata.token_endpoint,
-        resource: config.oauth_resource,
+        resource,
         ..TeamSession::default()
     })?;
     refresh_account().await?;
@@ -359,14 +374,11 @@ async fn usable_session() -> Result<TeamSession> {
         return Ok(session);
     }
     let refresh_token = session.refresh_token.clone().context("login session expired")?;
-    let mut token_form = vec![
+    let token_form = vec![
         ("grant_type", "refresh_token"),
         ("client_id", session.client_id.as_str()),
         ("refresh_token", refresh_token.as_str()),
     ];
-    if !session.resource.trim().is_empty() {
-        token_form.push(("resource", session.resource.as_str()));
-    }
     let token = reqwest::Client::new()
         .post(&session.token_endpoint)
         .form(&token_form)

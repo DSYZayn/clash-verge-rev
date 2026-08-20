@@ -5,6 +5,7 @@ on:
     paths:
       - 'team-worker/**'
       - '.github/workflows/team-worker-ci.yml'
+      - '.github/workflows/team-worker-deploy.yml'
   workflow_dispatch:
 
 permissions:
@@ -36,7 +37,13 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      # Placeholder bindings in wrangler.toml are enough for a dry run; a real
-      # deploy happens manually after filling in D1/KV ids and secrets.
+      - name: Generate a test deployment config
+        env:
+          TEAM_DOMAIN: https://example.cloudflareaccess.com
+          ACCESS_AUD: test-access-aud
+          D1_DATABASE_ID: 00000000-0000-0000-0000-000000000000
+          KV_NAMESPACE_ID: 00000000000000000000000000000000
+        run: npm run config:prepare
+
       - name: Wrangler dry run
-        run: npx wrangler deploy --dry-run
+        run: npx wrangler deploy --dry-run --config wrangler.generated.toml

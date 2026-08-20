@@ -5,7 +5,16 @@ This Worker sits behind a Cloudflare Access self-hosted application with
 looks up the user's entitlement in D1, and proxies the managed Clash YAML
 without revealing the upstream URL to the desktop app.
 
-## Provision
+## Recommended production deployment
+
+Use the repository's **Deploy Team Worker** GitHub Action. It reads non-secret
+configuration and credentials from the `team-production` GitHub Environment,
+generates the ignored `wrangler.generated.toml`, applies migrations, deploys,
+and copies the upstream URL from a GitHub Environment Secret to a Cloudflare
+Worker Secret. See [`../docs/team-deployment.zh-CN.md`](../docs/team-deployment.zh-CN.md)
+for the complete Cloudflare Access and client-build sequence.
+
+## Local provisioning
 
 ```powershell
 wrangler d1 create clash-verge-team
@@ -13,26 +22,29 @@ wrangler kv namespace create RESOURCE_CACHE
 wrangler kv namespace create RESOURCE_CACHE --preview
 ```
 
-Copy the returned IDs to `wrangler.toml`, then configure `TEAM_DOMAIN` and
-`ACCESS_AUD`. Store the real resource URL as a Worker secret:
+Copy `.env.example` to `.env` and fill the returned IDs, `TEAM_DOMAIN`, and
+`ACCESS_AUD`. Both `.env` and the generated Wrangler config are ignored. Store
+the real resource URL as a Worker secret:
 
 ```powershell
-wrangler secret put UPSTREAM_SUBSCRIPTION_URL
-pnpm install
-pnpm db:migrate:remote
-pnpm deploy
+npm install
+npm run config:prepare
+npx wrangler secret put UPSTREAM_SUBSCRIPTION_URL --config wrangler.generated.toml
+npm run db:migrate:remote
+npm run deploy
 ```
 
-Create an entitlement after the first Access login. Use the Access JWT `sub`
-claim when available; email is retained as a migration/fallback lookup:
+Create an entitlement before or after the first Access login. A `pending:` key
+allows pre-provisioning by email; after the first valid Access request the
+Worker replaces it with the immutable JWT `sub`:
 
 ```sql
 INSERT INTO users (
   access_subject, email, display_name, team_name, enabled,
   quota_upload, quota_download, quota_total, quota_expire
 ) VALUES (
-  'ACCESS_SUBJECT', 'user@example.com', 'Example User', 'Example Team', 1,
-  0, 0, 107374182400, 1790000000
+  'pending:user@example.com', 'user@example.com', 'Example User', 'Example Team', 1,
+  NULL, NULL, NULL, NULL
 );
 ```
 

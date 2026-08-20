@@ -19,3 +19,7 @@ CLAUDE.md
 .claude
 AGENTS.md
 .zed
+team-worker/.env
+team-worker/.dev.vars
+team-worker/.wrangler/
+team-worker/wrangler.generated.toml

@@ -42,7 +42,10 @@ before building:
 - `oauth_discovery_url`: the Managed OAuth discovery endpoint.
 - `oauth_client_id`: leave empty to use dynamic client registration, or set a
   registered public client ID.
-- `oauth_resource`: normally the same Access-protected API origin.
+- `oauth_scopes`: leave empty for Cloudflare Managed OAuth unless the server
+  explicitly advertises additional scopes.
+- `oauth_resource`: normally the same Access-protected API origin; it defaults
+  to `api_base_url` when empty.
 - `sync_interval_minutes`: background resource refresh interval.
 - `auto_activate`: make the managed profile current after a successful sync.
 
@@ -55,17 +58,18 @@ per-platform selection. Installers are uploaded as workflow artifacts named
 `clash-verge-team-<platform>`.
 
 Real deployment values do not belong in git. Instead of editing
-`team-config.json` before a CI build, set these repository variables under
-**Settings > Secrets and variables > Actions > Variables**; when
-`TEAM_API_BASE_URL` is present, the workflow regenerates
+`team-config.json` before a CI build, set variables in the GitHub Environment
+named `team-production`; when `TEAM_API_BASE_URL` or `WORKER_CUSTOM_DOMAIN` is
+present, the workflow regenerates
 `src-tauri/resources/team-config.json` with `enabled: true`:
 
-- `TEAM_API_BASE_URL` - Access-protected Worker custom domain (required to
-  activate team features in CI builds).
+- `TEAM_API_BASE_URL` - Access-protected Worker custom domain. It defaults to
+  `WORKER_CUSTOM_DOMAIN` when omitted.
 - `TEAM_OAUTH_DISCOVERY_URL` - optional; defaults to the Managed OAuth
   discovery endpoint under `TEAM_API_BASE_URL`'s team domain.
 - `TEAM_OAUTH_CLIENT_ID` - optional; empty means dynamic client registration.
-- `TEAM_OAUTH_RESOURCE` - optional resource indicator.
+- `TEAM_OAUTH_RESOURCE` - optional resource indicator; defaults to the API
+  origin.
 - `TEAM_PROFILE_NAME` - optional display name of the managed profile.
 - `TEAM_SYNC_INTERVAL_MINUTES` - optional, default `360`.
 
@@ -77,9 +81,11 @@ private distribution. Before shipping, also replace the
 feed or remove the updater entirely.
 
 [`.github/workflows/team-worker-ci.yml`](../.github/workflows/team-worker-ci.yml)
-typechecks the Worker and runs `wrangler deploy --dry-run` on pushes that touch
-`team-worker/`. Real deployment stays manual (`wrangler deploy`) after filling
-in `wrangler.toml` and secrets.
+typechecks the Worker and runs `wrangler deploy --dry-run`. The manual
+[`team-worker-deploy.yml`](../.github/workflows/team-worker-deploy.yml) workflow
+generates a production Wrangler config from the `team-production` Environment,
+applies D1 migrations, deploys the Worker, and optionally synchronizes the
+upstream URL from a GitHub Secret into a Worker Secret.
 
 In Cloudflare Zero Trust, edit the self-hosted Access application and:
 
@@ -97,7 +103,8 @@ Windows Credential Manager, macOS Keychain, or Linux Secret Service.
 
 ## Worker deployment
 
-See [`team-worker/README.md`](../team-worker/README.md). In summary:
+See [`team-worker/README.md`](../team-worker/README.md) and the detailed
+[Chinese production guide](team-deployment.zh-CN.md). In summary:
 
 1. Create D1 and KV resources and copy their IDs into `wrangler.toml`.
 2. Fill `TEAM_DOMAIN` and `ACCESS_AUD`.

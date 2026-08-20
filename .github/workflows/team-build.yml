@@ -42,6 +42,7 @@ concurrency:
 
 jobs:
   build:
+    environment: team-production
     strategy:
       fail-fast: false
       matrix:
@@ -119,7 +120,7 @@ jobs:
       - name: Apply team config from repository variables (optional)
         shell: pwsh
         env:
-          TEAM_API_BASE_URL: ${{ vars.TEAM_API_BASE_URL }}
+          TEAM_API_BASE_URL: ${{ vars.TEAM_API_BASE_URL || vars.WORKER_CUSTOM_DOMAIN }}
           TEAM_OAUTH_DISCOVERY_URL: ${{ vars.TEAM_OAUTH_DISCOVERY_URL }}
           TEAM_OAUTH_CLIENT_ID: ${{ vars.TEAM_OAUTH_CLIENT_ID }}
           TEAM_OAUTH_RESOURCE: ${{ vars.TEAM_OAUTH_RESOURCE }}
@@ -136,8 +137,8 @@ jobs:
             api_base_url = $env:TEAM_API_BASE_URL
             oauth_discovery_url = $(if ($env:TEAM_OAUTH_DISCOVERY_URL) { $env:TEAM_OAUTH_DISCOVERY_URL } else { "$($env:TEAM_API_BASE_URL.TrimEnd('/'))/.well-known/oauth-authorization-server" })
             oauth_client_id = $env:TEAM_OAUTH_CLIENT_ID
-            oauth_scopes = @('openid', 'profile', 'email', 'offline_access')
-            oauth_resource = $env:TEAM_OAUTH_RESOURCE
+            oauth_scopes = @()
+            oauth_resource = $(if ($env:TEAM_OAUTH_RESOURCE) { $env:TEAM_OAUTH_RESOURCE } else { $env:TEAM_API_BASE_URL.TrimEnd('/') })
             account_path = '/v1/desktop/account'
             profile_path = '/v1/desktop/profile'
             managed_profile_name = $(if ($env:TEAM_PROFILE_NAME) { $env:TEAM_PROFILE_NAME } else { 'Team Network' })
@@ -172,6 +173,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tauriScript: pnpm
           args: --target ${{ matrix.target }} -b ${{ matrix.bundle }} --config src-tauri/tauri.team.conf.json
