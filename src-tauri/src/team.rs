@@ -423,7 +423,7 @@ pub fn logout() -> Result<()> {
 pub async fn refresh_account() -> Result<TeamStatus> {
     let config = load_config()?;
     let mut session = usable_session().await?;
-    let account = reqwest::Client::new()
+    let mut account = reqwest::Client::new()
         .get(endpoint(&config.api_base_url, &config.account_path)?)
         .bearer_auth(&session.access_token)
         .send()
@@ -431,6 +431,9 @@ pub async fn refresh_account() -> Result<TeamStatus> {
         .error_for_status()?
         .json::<TeamAccount>()
         .await?;
+    if account.quota.is_none() {
+        account.quota = session.account.as_ref().and_then(|previous| previous.quota.clone());
+    }
     session.account = Some(account);
     save_session(&session)?;
     status().await

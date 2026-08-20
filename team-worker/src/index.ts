@@ -187,15 +187,19 @@ async function handleRequest(
       displayName: user.display_name,
       team: user.team_name ?? env.DEFAULT_TEAM_NAME,
       enabled: true,
-      quota: quota(user),
+      // A null total means quota is inherited from Subscription-Userinfo. The
+      // desktop preserves its last synchronized value until /profile refreshes it.
+      quota: user.quota_total !== null ? quota(user) : null,
     })
   }
 
   if (request.method === 'GET' && url.pathname === '/v1/desktop/profile') {
     const resource = await fetchResource(env)
-    const effectiveEtag = await sha256Etag(
-      `${resource.etag}:${quotaHeader(user)}`,
-    )
+    const effectiveQuota =
+      user.quota_total !== null
+        ? quotaHeader(user)
+        : (resource.subscriptionUserinfo ?? quotaHeader(user))
+    const effectiveEtag = await sha256Etag(`${resource.etag}:${effectiveQuota}`)
     if (request.headers.get('if-none-match') === effectiveEtag) {
       return new Response(null, {
         status: 304,
@@ -207,10 +211,7 @@ async function handleRequest(
       'content-type': 'application/yaml; charset=utf-8',
       'cache-control': 'private, no-store',
       etag: effectiveEtag,
-      'subscription-userinfo':
-        user.quota_total !== null
-          ? quotaHeader(user)
-          : (resource.subscriptionUserinfo ?? quotaHeader(user)),
+      'subscription-userinfo': effectiveQuota,
       'profile-update-interval': '6',
     })
     if (resource.contentDisposition)
