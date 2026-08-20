@@ -11,7 +11,7 @@ Cloudflare 给桌面端返回不透明 access token，并在 API 请求到达 Wo
 ## 需要提前准备
 
 1. 一个已接入 Cloudflare 的域名，以及准备用作 API 的子域名，例如
-   `team-api.example.com`。
+   `clash-sub.dongsy.com.cn`。
 2. Cloudflare Zero Trust team domain，例如
    `https://your-team.cloudflareaccess.com`。
 3. 现有 Casdoor 身份源，以及准备允许登录的邮箱或用户组。
@@ -50,7 +50,7 @@ GitHub Environment 生成临时配置文件。
 在 **Zero Trust > Access controls > Applications** 中创建或编辑一个
 **Self-hosted** 应用：
 
-1. Application domain 填 API 子域名，例如 `team-api.example.com`。
+1. Application domain 填 API 子域名，例如 `clash-sub.dongsy.com.cn`。
 2. 保留 Casdoor 作为身份提供方，添加 Allow policy，按邮箱或 Casdoor 用户组放行。
    不要为整个域名设置 Bypass policy。
 3. 在 **Advanced settings** 开启 **Managed OAuth**。
@@ -61,7 +61,7 @@ GitHub Environment 生成临时配置文件。
 最终应能访问以下元数据地址：
 
 ```text
-https://team-api.example.com/.well-known/oauth-authorization-server
+https://clash-sub.dongsy.com.cn/.well-known/oauth-authorization-server
 ```
 
 桌面端不直接接入 Casdoor SDK。浏览器打开 Cloudflare 的授权地址后，Access 会继续
@@ -93,7 +93,7 @@ D1/KV 自动创建，因此 GitHub 侧最少只需填 `WORKER_CUSTOM_DOMAIN`（�
 
 | 名称 | 示例/含义 |
 | --- | --- |
-| `WORKER_CUSTOM_DOMAIN` | `https://team-api.example.com`，必须带 `https://`；客户端的 `api_base_url` 由它生成 |
+| `WORKER_CUSTOM_DOMAIN` | `https://clash-sub.dongsy.com.cn`，必须带 `https://`；客户端的 `api_base_url` 由它生成 |
 
 可选：
 
@@ -173,7 +173,7 @@ gh variable set WORKER_CUSTOM_DOMAIN --env team-production -R DSYZayn/clash-verg
 
    保存后立即生效；wrangler.toml 启用了 `keep_vars`，之后每次重新部署都会
    保留这里的最新值。
-6. 在 **Settings → Domains & Routes** 绑定 `team-api.example.com` 自定义域名。
+6. 在 **Settings → Domains & Routes** 绑定 `clash-sub.dongsy.com.cn` 自定义域名。
    wrangler.toml 不声明 routes，dashboard 绑定的域名不会被后续部署冲掉。
 
 ### 4b. Deploy Team Worker Action（兜底）

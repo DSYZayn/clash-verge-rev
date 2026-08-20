@@ -58,20 +58,32 @@ function ensureD1(toml) {
   if (!databaseName)
     throw new Error(`[ensure] ${D1_BINDING} requires a database_name`)
 
-  const findDatabase = () =>
-    JSON.parse(wrangler('d1 list --json')).find(
+  const listDatabases = () =>
+    JSON.parse(wrangler('d1 list --json')).filter(
       (db) => db.name === databaseName,
     )
 
-  let id = (findDatabase() || {}).uuid
+  const matches = listDatabases()
+  let id = (matches[0] || {}).uuid
+  if (matches.length > 1) {
+    console.log(
+      `[ensure] WARNING: ${matches.length} D1 databases named "${databaseName}"` +
+        ` (${matches.map((db) => db.uuid).join(', ')}); using ${id}`,
+    )
+  }
   if (id) {
     console.log(`[ensure] reusing D1 database "${databaseName}" (${id})`)
   } else {
-    const out = wrangler(`d1 create ${databaseName}`)
-    id = parseCreatedId(out, 'database_id', 36) || (findDatabase() || {}).uuid
+    let out = ''
+    try {
+      out = wrangler(`d1 create ${databaseName}`)
+    } catch {
+      console.log('[ensure] d1 create failed; re-checking the list')
+    }
+    id = parseCreatedId(out, 'database_id', 36) || (listDatabases()[0] || {}).uuid
     if (!id)
       throw new Error(
-        `[ensure] could not determine the new database id from:\n${out}`,
+        `[ensure] could not create or find D1 database "${databaseName}"`,
       )
     console.log(`[ensure] created D1 database "${databaseName}" (${id})`)
   }
@@ -92,25 +104,40 @@ function ensureKv(toml, workerName) {
     return toml
   }
 
-  const canonicalTitle = normalize(`${workerName}-${KV_BINDING}`)
+  // Accept the worker-prefixed title and the bare binding name, so a
+  // namespace created by hand either way is reused instead of duplicated.
+  const titles = new Set([
+    normalize(`${workerName}-${KV_BINDING}`),
+    normalize(KV_BINDING),
+  ])
   const findNamespace = () =>
-    JSON.parse(wrangler('kv namespace list')).find(
-      (ns) => normalize(ns.title) === canonicalTitle,
+    JSON.parse(wrangler('kv namespace list')).find((ns) =>
+      titles.has(normalize(ns.title)),
     )
 
   let id = (findNamespace() || {}).id
   if (id) {
-    console.log(`[ensure] reusing KV namespace "${canonicalTitle}" (${id})`)
+    console.log(`[ensure] reusing KV namespace (${id})`)
   } else {
-    // Wrangler prefixes the title with the worker name from wrangler.toml, so
-    // pass the bare binding name and then re-list to learn the real title/id.
-    const out = wrangler(`kv namespace create ${KV_BINDING}`)
+    let out = ''
+    try {
+      out = wrangler(`kv namespace create ${KV_BINDING}`)
+    } catch {
+      // Titles are unique per account; a conflict means the namespace exists
+      // under an alias, so re-list before giving up.
+      console.log('[ensure] kv create failed; re-checking the list')
+    }
     id = parseCreatedId(out, 'id', 32) || (findNamespace() || {}).id
-    if (!id)
+    if (!id) {
+      const existing = JSON.parse(wrangler('kv namespace list'))
+        .map((ns) => ns.title)
+        .join(', ')
       throw new Error(
-        `[ensure] could not determine the new namespace id from:\n${out}`,
+        '[ensure] could not create or find the KV namespace. ' +
+          `Existing titles: ${existing || '(none)'}`,
       )
-    console.log(`[ensure] created KV namespace "${canonicalTitle}" (${id})`)
+    }
+    console.log(`[ensure] created KV namespace (${id})`)
   }
 
   const pinned = block.replace(

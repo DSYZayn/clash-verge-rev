@@ -56,7 +56,7 @@ Clash 配置发给桌面端。真实订阅 URL 只存在于 Worker Secret，客�
    保存后立即生效；`keep_vars` 保证之后每次 push 重新部署时都保留这里的
    最新值。未配置时 Worker 会返回 503 提示。
 6. 自定义域名：Worker → **Settings → Domains & Routes** → 添加
-   `team-api.example.com`。wrangler.toml 不声明 routes，dashboard 里绑定的
+   `clash-sub.dongsy.com.cn`。wrangler.toml 不声明 routes，dashboard 里绑定的
    域名不会被后续部署冲掉。
 
 ### 注意事项
