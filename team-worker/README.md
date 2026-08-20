@@ -54,6 +54,7 @@ Clash 配置发给桌面端。真实订阅 URL 只存在于 Worker Secret，客�
    | `UPSTREAM_SUBSCRIPTION_URL` | Secret | 真实订阅 URL |
    | `DEFAULT_TEAM_NAME` | Text（可选） | 团队显示名；不填用代码默认值 |
    | `CACHE_TTL_SECONDS` | Text（可选） | KV 缓存秒数；不填默认 300 |
+   | `ADMIN_API_TOKEN` | Secret（可选） | 推送模式管理令牌；上游 WAF 拦截机房出口时启用，见部署文档 4c |
 
    保存后立即生效；`keep_vars` 保证之后每次 push 重新部署时都保留这里的
    最新值。未配置时 Worker 会返回 503 提示。
@@ -104,3 +105,4 @@ login`，并把 `.env.example` 复制为 `.env` 填好（`.env` 已被 git 忽�
 | `GET /healthz` | 无 | 存活探测 |
 | `GET /v1/desktop/account` | Access JWT（首登自动建档） | 账户与额度信息 |
 | `GET /v1/desktop/profile` | Access JWT（首登自动建档） | 受管 Clash YAML（ETag/304） |
+| `PUT /v1/admin/resource` | ADMIN_API_TOKEN（Bearer） | 推送受管配置内容（推送模式） |

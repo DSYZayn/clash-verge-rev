@@ -24,3 +24,4 @@ team-worker/.dev.vars
 team-worker/.wrangler/
 team-worker/wrangler.generated.toml
 team-worker/.dry-run/
+team-worker/scripts/push-resource.config.json

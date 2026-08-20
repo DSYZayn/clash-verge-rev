@@ -15,7 +15,8 @@ interface Env {
   ACCESS_AUD: string
   DEFAULT_TEAM_NAME?: string
   CACHE_TTL_SECONDS?: string
-  UPSTREAM_SUBSCRIPTION_URL: string
+  UPSTREAM_SUBSCRIPTION_URL?: string
+  ADMIN_API_TOKEN?: string
 }
 
 interface UserRow {
@@ -107,6 +108,10 @@ function ensureSchema(env: Env) {
 }
 
 const PLACEHOLDER_VALUE = /YOUR[-_]|REPLACE_|CHANGE[-_]?ME/i
+
+// Single KV slot for the managed profile. Admin pushes (PUT /v1/admin/resource)
+// store without expiry; direct upstream fetches populate it with a TTL.
+const RESOURCE_CACHE_KEY = 'managed-profile:v1'
 
 async function authenticate(request: Request, env: Env): Promise<JWTPayload> {
   // Access injects Cf-Access-Jwt-Assertion on the origin request, but accept a
@@ -245,11 +250,58 @@ async function sha256Etag(body: string) {
   return `"${hex}"`
 }
 
-async function fetchResource(env: Env): Promise<CachedResource> {
-  const cacheKey = 'managed-profile:v1'
-  const cached = await env.RESOURCE_CACHE.get<CachedResource>(cacheKey, 'json')
+// The managed profile is served from KV. Admin pushes are the primary path for
+// upstreams whose WAF blocks datacenter egress; a direct upstream fetch is the
+// fallback when nothing has been pushed yet.
+async function getResource(env: Env): Promise<CachedResource> {
+  const cached = await env.RESOURCE_CACHE.get<CachedResource>(
+    RESOURCE_CACHE_KEY,
+    'json',
+  )
   if (cached) return cached
+  return fetchResource(env)
+}
 
+async function putResource(
+  env: Env,
+  body: string,
+  subscriptionUserinfo?: string,
+  contentDisposition?: string,
+) {
+  const resource: CachedResource = {
+    body,
+    etag: await sha256Etag(body),
+    subscriptionUserinfo,
+    contentDisposition,
+  }
+  // No expiration: a pushed resource is served until the next push replaces
+  // it, so a stalled uploader never breaks clients.
+  await env.RESOURCE_CACHE.put(RESOURCE_CACHE_KEY, JSON.stringify(resource))
+  return resource
+}
+
+// Machine-to-machine ingestion for the managed profile, authenticated with a
+// dedicated admin secret rather than an Access identity. Typically called by
+// a scheduled uploader running on a residential-IP machine.
+async function handleAdminResourcePut(request: Request, env: Env) {
+  if (!env.ADMIN_API_TOKEN)
+    return json({ error: 'Admin endpoint is not configured' }, 503)
+  if (request.headers.get('authorization') !== `Bearer ${env.ADMIN_API_TOKEN}`)
+    return json({ error: 'Invalid admin token' }, 401)
+  const body = await request.text()
+  if (!body || body.length > 10 * 1024 * 1024)
+    return json({ error: 'Body is empty or exceeds the 10 MiB limit' }, 400)
+  const resource = await putResource(
+    env,
+    body,
+    request.headers.get('x-subscription-userinfo') ?? undefined,
+    request.headers.get('x-content-disposition') ?? undefined,
+  )
+  console.log(`admin resource pushed: ${body.length} bytes, etag: ${resource.etag}`)
+  return json({ ok: true, bytes: body.length, etag: resource.etag })
+}
+
+async function fetchResource(env: Env): Promise<CachedResource> {
   if (!env.UPSTREAM_SUBSCRIPTION_URL) {
     throw new Response('UPSTREAM_SUBSCRIPTION_URL is not configured', {
       status: 503,
@@ -299,7 +351,7 @@ async function fetchResource(env: Env): Promise<CachedResource> {
     contentDisposition:
       response.headers.get('content-disposition') ?? undefined,
   }
-  await env.RESOURCE_CACHE.put(cacheKey, JSON.stringify(resource), {
+  await env.RESOURCE_CACHE.put(RESOURCE_CACHE_KEY, JSON.stringify(resource), {
     expirationTtl: Math.max(60, Number(env.CACHE_TTL_SECONDS) || 300),
   })
   return resource
@@ -342,6 +394,10 @@ async function handleRequest(
       503,
     )
 
+  if (request.method === 'PUT' && url.pathname === '/v1/admin/resource') {
+    return handleAdminResourcePut(request, env)
+  }
+
   const identity = await authenticate(request, env)
   try {
     await ensureSchema(env)
@@ -375,7 +431,7 @@ async function handleRequest(
   }
 
   if (request.method === 'GET' && url.pathname === '/v1/desktop/profile') {
-    const resource = await fetchResource(env)
+    const resource = await getResource(env)
     const effectiveQuota =
       user.quota_total !== null
         ? quotaHeader(user)

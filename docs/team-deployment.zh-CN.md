@@ -167,8 +167,9 @@ gh variable set WORKER_CUSTOM_DOMAIN --env team-production -R DSYZayn/clash-verg
 5. 在 Worker 的 **Settings → Variables and Secrets** 添加：
    - `TEAM_DOMAIN`（Text）：Access 团队域名，如 `https://your-team.cloudflareaccess.com`
    - `ACCESS_AUD`（Text）：Access 应用的 Application Audience (AUD) tag
-   - `UPSTREAM_SUBSCRIPTION_URL`（Secret）：真实订阅 URL
+   - `UPSTREAM_SUBSCRIPTION_URL`（Secret，可选）：真实订阅 URL；若上游 WAF 拦截机房出口（直连 403）可不填，改用 4c 推送模式
    - 可选：`DEFAULT_TEAM_NAME`（Text，团队显示名）、`CACHE_TTL_SECONDS`（Text，缓存秒数）
+   - 可选（推送模式）：`ADMIN_API_TOKEN`（Secret，长随机串），见 4c
 
    保存后立即生效；wrangler.toml 启用了 `keep_vars`，之后每次重新部署都会
    保留这里的最新值。
@@ -195,6 +196,32 @@ Domain。生成文件已被 `.gitignore` 排除。
 部署后，在未登录状态访问 API 域名应该由 Access 返回 `401` 和
 `WWW-Authenticate`/OAuth resource metadata，而不是返回 YAML 或上游 URL。若直接
 得到 Worker 内容，说明该域名尚未受到正确的 Access 应用保护。
+
+### 4c. 上游被 WAF 拦截时：推送模式（住宅 IP 定时上传）
+
+部分机场的 Cloudflare WAF 会拦截机房出口 IP，Worker 直连上游得到 403（日志里
+`upstream fetch failed: 403`，响应体是 "Attention Required" 拦截页）。这时改用
+推送模式：一台有住宅 IP 的常开机器定时抓取订阅并推送给 Worker。
+
+1. 在 Worker 的 Variables and Secrets 添加 Secret：`ADMIN_API_TOKEN`（长随机串）。
+2. 复制 `team-worker/scripts/push-resource.config.example.json` 为
+   `push-resource.config.json`（已被 git 忽略），填入：
+   - `subscription_url`：真实订阅链接（只存在这台机器上）
+   - `worker_base_url`：Worker 的 workers.dev 地址（形如
+     `https://clash-verge-rev.<子域>.workers.dev`，Worker 概览页可见）。
+     workers.dev 入口不经 Access，由 `ADMIN_API_TOKEN` 自身鉴权
+   - `admin_token`：与 Worker Secret 相同的值
+3. 手动跑一次确认：`powershell -File team-worker/scripts/push-resource.ps1`，
+   输出 `pushed ... bytes` 即成功，客户端随后同步即可用。
+4. 注册定时任务（每 30 分钟推送一次）：
+
+   ```powershell
+   schtasks /Create /TN "ClashVergeTeamResourcePush" /SC MINUTE /MO 30 /F `
+     /TR "powershell -NoProfile -ExecutionPolicy Bypass -File \"$PWD\team-worker\scripts\push-resource.ps1\""
+   ```
+
+推送内容在 KV 中长期保存（无 TTL），推送失败不影响客户端继续使用旧配置。
+`UPSTREAM_SUBSCRIPTION_URL` 若保留，则作为"从未推送过"时的兜底拉取路径。
 
 ## 5. 用户开通与管理
 
@@ -258,7 +285,9 @@ Worker 和 Access 验证通过后，打开 **Actions > Team Edition Build > Run 
 - Worker 返回 561：D1 用户查询失败，Worker 日志里有 `user lookup failed` 详情。
 - Worker 返回 403：该用户被禁用（`enabled = 0`），或 Access JWT 缺少 `sub`。
 - JWT audience 错误：`ACCESS_AUD` 不是保护当前 API 域名的那个 Access 应用 AUD。
-- Worker 返回 502：上游 URL 不可访问，或返回内容超过 10 MiB。
+- Worker 返回 502：上游拉取失败。看日志 `upstream fetch failed` 的状态码与响应体片段：
+  403 且 body 为 Cloudflare "Attention Required" 拦截页 → 上游 WAF 拦截机房出口，
+  改用 4c 推送模式；404 → 链接路径错误；返回内容超过 10 MiB 同样返回 502。
 - Worker Action 无权限创建自定义域名：为 API Token 增加目标 Zone 的 Workers
   Routes Edit；若仍失败，再增加 DNS Edit。
 - 构建出的客户端显示“团队功能尚未配置”：`WORKER_CUSTOM_DOMAIN` 和
