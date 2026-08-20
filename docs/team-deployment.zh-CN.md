@@ -197,11 +197,43 @@ Domain。生成文件已被 `.gitignore` 排除。
 `WWW-Authenticate`/OAuth resource metadata，而不是返回 YAML 或上游 URL。若直接
 得到 Worker 内容，说明该域名尚未受到正确的 Access 应用保护。
 
-### 4c. 上游被 WAF 拦截时：推送模式（住宅 IP 定时上传）
+### 4c. 上游被 WAF 拦截时：推送模式（绕过机房出口）
 
-部分机场的 Cloudflare WAF 会拦截机房出口 IP，Worker 直连上游得到 403（日志里
-`upstream fetch failed: 403`，响应体是 "Attention Required" 拦截页）。这时改用
-推送模式：一台有住宅 IP 的常开机器定时抓取订阅并推送给 Worker。
+部分机场的 Cloudflare 安全规则会拦截机房出口请求：Worker 直连上游得到 403
+（日志里 `upstream fetch failed: 403`，响应体是 "Attention Required" 拦截页）。
+Worker 子请求的 TLS/H2 指纹由 workerd 决定，代码层面无法伪装——sublink-worker
+等订阅转换项目用的也只是普通 `fetch` + UA，遇到这类规则同样会被拦。解决思路是
+把"拉取"搬到非机房网络，再把结果推送给 Worker；客户端始终只访问 Worker，
+完全无感知。
+
+**先确诊，再启用**：在已登录浏览器打开
+`https://clash-sub.dongsy.com.cn/debug/upstream`，返回 `ok: false` 且
+`bodySnippet` 是 Cloudflare 拦截页即确诊（该探针同时返回 `urlCheck`，含路径长度
+与查询参数名列表，用于确认 Secret 里存的是完整订阅链接而非只有域名）。若
+`ok: true` 则说明上游已放行 Worker，无需推送模式。
+
+#### 方案 A：GitHub Actions 定时推送（推荐，无需常开机器）
+
+工作流 `.github/workflows/team-resource-push.yml` 已随仓库提供：GitHub 托管
+runner 拉取上游并 PUT 到 Worker，可配置为每 30 分钟一次。
+
+1. 在 GitHub 仓库 → Settings → Environments → `team-production` 添加三个
+   Secrets：
+   - `UPSTREAM_SUBSCRIPTION_URL`：真实订阅链接
+   - `WORKER_ADMIN_URL`：`https://clash-verge-rev.<子域>.workers.dev/v1/admin/resource`
+     （workers.dev 地址在 Worker 概览页可见；该入口不经 Access，由
+     `ADMIN_API_TOKEN` 鉴权）
+   - `ADMIN_API_TOKEN`：长随机串，与下一步 Worker 端保持一致
+2. 在 Worker 的 Variables and Secrets 添加同名 Secret `ADMIN_API_TOKEN`（相同值）。
+3. 工作流的 `workflow_dispatch` 与 `schedule` 只在**默认分支**（`dev`）上的工作流
+   文件生效：先将该文件合并到 `dev`，然后在 Actions → Team Resource Push →
+   Run workflow 手动跑一次。日志显示 `upstream HTTP status: 200` 且 PUT 返回
+   `{"ok":true,...}` 即成功，客户端随后同步即可用。
+4. 若 GitHub runner（同属机房出口）也拿不到 200，说明上游只放行住宅 IP，请改用
+   方案 B。
+5. 手动跑通后解开文件顶部的 `schedule:` 注释，启用每 30 分钟自动推送。
+
+#### 方案 B：住宅 IP 机器定时推送
 
 1. 在 Worker 的 Variables and Secrets 添加 Secret：`ADMIN_API_TOKEN`（长随机串）。
 2. 复制 `team-worker/scripts/push-resource.config.example.json` 为
