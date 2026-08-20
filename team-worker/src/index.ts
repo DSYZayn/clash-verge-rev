@@ -56,7 +56,12 @@ function ensureSchema(env: Env) {
 const PLACEHOLDER_VALUE = /YOUR[-_]|REPLACE_|CHANGE[-_]?ME/i
 
 async function authenticate(request: Request, env: Env): Promise<JWTPayload> {
-  const assertion = request.headers.get('cf-access-jwt-assertion')
+  // Access injects Cf-Access-Jwt-Assertion on the origin request, but accept a
+  // Bearer token too so the worker stays correct if the header is stripped.
+  const bearer = request.headers.get('authorization')
+  const assertion =
+    request.headers.get('cf-access-jwt-assertion') ??
+    (bearer?.toLowerCase().startsWith('bearer ') ? bearer.slice(7).trim() : null)
   if (!assertion)
     throw new Response('Missing Cloudflare Access assertion', { status: 401 })
 
@@ -72,12 +77,20 @@ async function authenticate(request: Request, env: Env): Promise<JWTPayload> {
     )
   }
   const issuer = normalizedIssuer(env.TEAM_DOMAIN)
-  const jwks = createRemoteJWKSet(new URL(`${issuer}/cdn-cgi/access/certs`))
-  const { payload } = await jwtVerify(assertion, jwks, {
-    issuer,
-    audience: env.ACCESS_AUD,
-  })
-  return payload
+  try {
+    const jwks = createRemoteJWKSet(new URL(`${issuer}/cdn-cgi/access/certs`))
+    const { payload } = await jwtVerify(assertion, jwks, {
+      issuer,
+      audience: env.ACCESS_AUD,
+    })
+    return payload
+  } catch (error) {
+    // Verification failures (aud/issuer mismatch, unreachable JWKS, malformed
+    // TEAM_DOMAIN) must surface as a diagnosable 401 in the Worker logs, not
+    // as an opaque 500 from the catch-all handler.
+    console.error('access assertion verification failed:', error)
+    throw new Response('Access assertion verification failed', { status: 401 })
+  }
 }
 
 async function getUser(
@@ -204,6 +217,16 @@ async function handleRequest(
 ) {
   const url = new URL(request.url)
   if (url.pathname === '/healthz') return json({ ok: true })
+
+  const bindings = env as Partial<Env>
+  if (!bindings.TEAM_DB || !bindings.RESOURCE_CACHE)
+    return json(
+      {
+        error:
+          'Worker bindings missing: bind TEAM_DB (D1) and RESOURCE_CACHE (KV), then redeploy',
+      },
+      503,
+    )
 
   const identity = await authenticate(request, env)
   await ensureSchema(env)
