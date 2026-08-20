@@ -46,7 +46,31 @@ const normalizedIssuer = (teamDomain: string) => teamDomain.replace(/\/$/, '')
 let schemaInit: Promise<unknown> | undefined
 
 function ensureSchema(env: Env) {
-  schemaInit ??= env.TEAM_DB.exec(schemaSql).catch((error: unknown) => {
+  schemaInit ??= (async () => {
+    await env.TEAM_DB.exec(schemaSql)
+    // Self-heal databases whose users table predates the current schema:
+    // CREATE TABLE IF NOT EXISTS cannot retrofit missing columns.
+    const { results } = await env.TEAM_DB.prepare(
+      'PRAGMA table_info(users)',
+    ).all<{ name: string }>()
+    const existing = new Set(results.map((row) => row.name))
+    const columns: Array<[string, string]> = [
+      ['email', 'TEXT'],
+      ['display_name', 'TEXT'],
+      ['team_name', 'TEXT'],
+      ['enabled', 'INTEGER NOT NULL DEFAULT 1'],
+      ['quota_upload', 'INTEGER'],
+      ['quota_download', 'INTEGER'],
+      ['quota_total', 'INTEGER'],
+      ['quota_expire', 'INTEGER'],
+      ['created_at', 'TEXT'],
+      ['updated_at', 'TEXT'],
+    ]
+    for (const [name, type] of columns) {
+      if (!existing.has(name))
+        await env.TEAM_DB.exec(`ALTER TABLE users ADD COLUMN ${name} ${type}`)
+    }
+  })().catch((error: unknown) => {
     schemaInit = undefined
     throw error
   })
@@ -229,8 +253,19 @@ async function handleRequest(
     )
 
   const identity = await authenticate(request, env)
-  await ensureSchema(env)
-  const user = await getUser(env, identity)
+  try {
+    await ensureSchema(env)
+  } catch (error) {
+    console.error('database schema init failed:', error)
+    return json({ error: 'Database schema initialization failed' }, 560)
+  }
+  let user: UserRow | null
+  try {
+    user = await getUser(env, identity)
+  } catch (error) {
+    console.error('user lookup failed:', error)
+    return json({ error: 'User lookup failed' }, 561)
+  }
   requireEnabledUser(user)
 
   if (request.method === 'GET' && url.pathname === '/v1/desktop/account') {

@@ -262,6 +262,8 @@ Worker 和 Access 验证通过后，打开 **Actions > Team Edition Build > Run 
   Observability/Logs 查看 `access assertion verification failed` 的具体原因。
 - Worker 返回 503（bindings missing）：D1/KV 绑定没有生效。绑定由部署脚本自动挂接，
   push 触发一次重新部署即可；若仍存在，检查 Worker > Settings > Bindings。
+- Worker 返回 560：D1 schema 初始化失败，Worker 日志里有 `database schema init failed` 详情。
+- Worker 返回 561：D1 用户查询失败，Worker 日志里有 `user lookup failed` 详情。
 - Worker 返回 403：D1 中没有匹配的邮箱/subject，用户被禁用，或 Casdoor 没有向
   Access 提供 email claim。
 - JWT audience 错误：`ACCESS_AUD` 不是保护当前 API 域名的那个 Access 应用 AUD。
