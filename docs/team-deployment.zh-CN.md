@@ -123,7 +123,8 @@ gh secret set UPSTREAM_SUBSCRIPTION_URL --env team-production -R DSYZayn/clash-v
   updater artifacts 并清空了上游更新地址，因此测试构建不要求这两个值。若以后启用
   私有自动更新，需要同时配置自己的更新地址、公钥和这两个签名 Secret。
 - `APPLE_CERTIFICATE`、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`、
-  `APPLE_ID`、`APPLE_PASSWORD`、`APPLE_TEAM_ID`：macOS 正式签名/公证。
+  `APPLE_ID`、`APPLE_PASSWORD`、`APPLE_TEAM_ID`：macOS 正式签名/公证。当前团队流水线
+  默认生成未签名 DMG；只有准备好完整证书后才应把这些变量接入签名步骤，不能只填空值。
 
 ## 4. 部署 Worker
 
