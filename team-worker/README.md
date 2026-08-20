@@ -85,28 +85,20 @@ npm run dev
 已部署且受 Access 保护的域名测试。本地跑 `npm run deploy` 前先 `npx wrangler
 login`，并把 `.env.example` 复制为 `.env` 填好（`.env` 已被 git 忽略）。
 
-## 用户授权
+## 用户开通
 
-在 **D1 → clash-verge-team → Console** 预授权用户。Worker 在用户首次成功请求时
-会把 `pending:` key 自动替换为 Access 的稳定 `sub`：
+无需手动添加用户：通过 Access 认证的用户在首次请求时自动建档（`enabled = 1`，
+并写入 `user_provisioned` 审计事件）。成员资格由 Access 策略控制；D1 里的
+`enabled = 0` 是单用户封禁开关。流量字段为 `NULL` 时客户端显示上游
+`Subscription-Userinfo`，要覆盖就填字节数和 Unix 秒时间戳。
 
-```sql
-INSERT INTO users (
-  access_subject, email, display_name, team_name, enabled,
-  quota_upload, quota_download, quota_total, quota_expire
-) VALUES (
-  'pending:user@example.com', 'user@example.com', 'Example User', 'Example Team', 1,
-  NULL, NULL, NULL, NULL
-);
-```
-
-流量字段为 `NULL` 时客户端显示上游 `Subscription-Userinfo`；要覆盖就填字节数
-和 Unix 秒时间戳。
+如需提前预置显示名/团队/额度，可手动插入 `access_subject` 为 `pending:邮箱`
+的记录，Worker 在用户首次成功请求时会自动把它替换为 Access 的稳定 `sub`。
 
 ## 端点
 
 | 端点 | 认证 | 说明 |
 | --- | --- | --- |
 | `GET /healthz` | 无 | 存活探测 |
-| `GET /v1/desktop/account` | Access JWT + D1 授权 | 账户与额度信息 |
-| `GET /v1/desktop/profile` | Access JWT + D1 授权 | 受管 Clash YAML（ETag/304） |
+| `GET /v1/desktop/account` | Access JWT（首登自动建档） | 账户与额度信息 |
+| `GET /v1/desktop/profile` | Access JWT（首登自动建档） | 受管 Clash YAML（ETag/304） |

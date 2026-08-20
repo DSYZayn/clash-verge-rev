@@ -195,41 +195,32 @@ Domain。生成文件已被 `.gitignore` 排除。
 `WWW-Authenticate`/OAuth resource metadata，而不是返回 YAML 或上游 URL。若直接
 得到 Worker 内容，说明该域名尚未受到正确的 Access 应用保护。
 
-## 5. 添加可用用户
+## 5. 用户开通与管理
 
-打开 **Cloudflare > D1 > clash-verge-team > Console**。用户第一次登录前，可以只按
-邮箱预授权；Worker 在第一次成功请求时会自动把 `pending:` key 替换为 Cloudflare
-Access 的稳定 `sub`：
+**无需手动添加用户。** 任何能通过 Cloudflare Access 认证的用户，首次登录时会
+在 D1 自动建档（记录 Access `sub`、邮箱、显示名，`enabled = 1`），并写入一条
+`user_provisioned` 审计事件。成员资格由 Access 应用的策略（Casdoor 登录规则）
+决定；D1 表只用于额度覆盖、审计和封禁。
+
+流量字段保持 `NULL` 时，客户端显示上游响应中的 `Subscription-Userinfo`。若要
+在 D1 中覆盖某用户额度，`quota_upload`、`quota_download`、`quota_total` 使用
+字节，`quota_expire` 使用 Unix 秒时间戳：
 
 ```sql
-INSERT INTO users (
-  access_subject, email, display_name, team_name, enabled,
-  quota_upload, quota_download, quota_total, quota_expire
-) VALUES (
-  'pending:user@example.com',
-  'user@example.com',
-  'Example User',
-  'Example Team',
-  1,
-  NULL, NULL, NULL, NULL
-)
-ON CONFLICT(email) DO UPDATE SET
-  display_name = excluded.display_name,
-  team_name = excluded.team_name,
-  enabled = 1,
-  updated_at = CURRENT_TIMESTAMP;
+UPDATE users SET quota_total = 1099511627776, updated_at = CURRENT_TIMESTAMP
+WHERE lower(email) = lower('user@example.com');
 ```
 
-流量字段保持 `NULL` 时，客户端显示上游响应中的 `Subscription-Userinfo`。若要在
-D1 中覆盖用户额度，`quota_upload`、`quota_download`、`quota_total` 使用字节，
-`quota_expire` 使用 Unix 秒时间戳。
-
-禁用用户：
+封禁用户（下次请求即被 403 拒绝）：
 
 ```sql
 UPDATE users SET enabled = 0, updated_at = CURRENT_TIMESTAMP
 WHERE lower(email) = lower('user@example.com');
 ```
+
+如需提前预建档（预置显示名/团队/额度），仍可手动插入 `access_subject` 为
+`pending:邮箱` 的记录，Worker 会在该用户首次成功请求时把它替换为 Access 的
+稳定 `sub`。
 
 ## 6. 构建已整合配置的客户端
 
@@ -264,8 +255,7 @@ Worker 和 Access 验证通过后，打开 **Actions > Team Edition Build > Run 
   push 触发一次重新部署即可；若仍存在，检查 Worker > Settings > Bindings。
 - Worker 返回 560：D1 schema 初始化失败，Worker 日志里有 `database schema init failed` 详情。
 - Worker 返回 561：D1 用户查询失败，Worker 日志里有 `user lookup failed` 详情。
-- Worker 返回 403：D1 中没有匹配的邮箱/subject，用户被禁用，或 Casdoor 没有向
-  Access 提供 email claim。
+- Worker 返回 403：该用户被禁用（`enabled = 0`），或 Access JWT 缺少 `sub`。
 - JWT audience 错误：`ACCESS_AUD` 不是保护当前 API 域名的那个 Access 应用 AUD。
 - Worker 返回 502：上游 URL 不可访问，或返回内容超过 10 MiB。
 - Worker Action 无权限创建自定义域名：为 API Token 增加目标 Zone 的 Workers

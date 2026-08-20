@@ -186,6 +186,33 @@ async function getUser(
   return user
 }
 
+// First-login enrollment: anyone who passed Cloudflare Access gets an
+// entitlement row created from the identity. Concurrent first requests race
+// on the primary key; ON CONFLICT keeps the loser benign and the row is
+// re-read so the winner's values are authoritative.
+async function provisionUser(
+  env: Env,
+  identity: JWTPayload,
+): Promise<UserRow | null> {
+  const subject = identity.sub
+  if (!subject) return null
+  const email = typeof identity.email === 'string' ? identity.email : null
+  const displayName =
+    typeof identity.name === 'string' && identity.name.trim() !== ''
+      ? identity.name
+      : email
+  await env.TEAM_DB.prepare(
+    `INSERT INTO users (access_subject, email, display_name, enabled)
+     VALUES (?1, ?2, ?3, 1)
+     ON CONFLICT(access_subject) DO NOTHING`,
+  )
+    .bind(subject, email, displayName)
+    .run()
+  const user = await getUser(env, identity)
+  if (user) await audit(env, user, 'user_provisioned')
+  return user
+}
+
 function requireEnabledUser(user: UserRow | null): asserts user is UserRow {
   if (!user)
     throw new Response('No team entitlement is assigned', { status: 403 })
@@ -302,9 +329,12 @@ async function handleRequest(
   let user: UserRow | null
   try {
     user = await getUser(env, identity)
+    // Access is the membership gate: provision on first login instead of
+    // requiring a manual D1 INSERT. users.enabled = 0 stays the kill switch.
+    user ??= await provisionUser(env, identity)
   } catch (error) {
-    console.error('user lookup failed:', describeError(error))
-    return json({ error: 'User lookup failed' }, 561)
+    console.error('user lookup/provision failed:', describeError(error))
+    return json({ error: 'User lookup or provisioning failed' }, 561)
   }
   requireEnabledUser(user)
 
