@@ -2,6 +2,12 @@ import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose'
 
 import schemaSql from '../migrations/0001_init.sql'
 
+// D1 exec treats each input line as its own statement: a pretty-printed
+// multi-line CREATE TABLE fails with "incomplete input". Flatten the
+// migration into a single line; the schema contains no string literals,
+// so collapsing whitespace is safe.
+const schemaBatch = schemaSql.replace(/\s+/g, ' ')
+
 interface Env {
   TEAM_DB: D1Database
   RESOURCE_CACHE: KVNamespace
@@ -85,7 +91,7 @@ async function healUsersTable(env: Env) {
 
 function ensureSchema(env: Env) {
   schemaInit ??= (async () => {
-    await env.TEAM_DB.exec(schemaSql)
+    await env.TEAM_DB.exec(schemaBatch)
     try {
       await healUsersTable(env)
     } catch (error) {
@@ -264,6 +270,17 @@ async function handleRequest(
 ) {
   const url = new URL(request.url)
   if (url.pathname === '/healthz') return json({ ok: true })
+
+  // TEMPORARY diagnostics: runs the D1 schema init without auth so remote
+  // failures can be measured directly. Removed once the root cause is fixed.
+  if (url.pathname === '/debug/schema-init') {
+    try {
+      await ensureSchema(env)
+      return json({ ok: true })
+    } catch (error) {
+      return json({ ok: false, error: describeError(error) }, 560)
+    }
+  }
 
   const bindings = env as Partial<Env>
   if (!bindings.TEAM_DB || !bindings.RESOURCE_CACHE)
