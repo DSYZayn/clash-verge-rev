@@ -241,17 +241,31 @@ Worker 子请求的 TLS/H2 指纹由 workerd 决定，代码层面无法伪装�
 
    私有仓库使用 self-hosted runner 是安全的；公共仓库切勿这么做（fork PR
    可在 runner 上执行任意代码）。
-3. 在 GitHub 仓库 → Settings → Environments → `team-production` 确认三个
+3. 在 GitHub 仓库 → Settings → Environments → `team-production` 确认
    Secrets：
    - `UPSTREAM_SUBSCRIPTION_URL`：真实订阅链接（已配置）
    - `ADMIN_API_TOKEN`：与 Worker 端 Secret 相同的长随机串（已配置）
-   - `WORKER_ADMIN_URL`：`https://clash-verge-rev.<子域>.workers.dev/v1/admin/resource`
-     （workers.dev 地址在 Worker 概览页可见；该入口不经 Access，由
-     `ADMIN_API_TOKEN` 鉴权）
-4. 在 Cloudflare Worker 的 Variables and Secrets 添加 Secret
-   `ADMIN_API_TOKEN`（与上一步 GitHub 侧相同的值）。
-5. `workflow_dispatch` 与 `schedule` 只在**默认分支**（`dev`）上的工作流文件
-   生效；该文件已合并到 dev。合并后可在 Actions → Team Resource Push →
+   - `WORKER_ADMIN_URL`：推送地址（已配置为
+     `https://clash-sub.dongsy.com.cn/v1/admin/resource`）
+   - `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET`：Access service
+     token（见下一步；推送地址走 Access 保护的域名时必须）
+4. 自定义域名整体在 Access 保护之下（实测无凭证 PUT 直接被 Access 以 401
+   拦截，请求到不了 Worker），机器调用需要 service token：Zero Trust →
+   Access controls → Service auth → Service tokens → 创建，得到 Client ID
+   和 Client Secret；然后在保护该域名的 Access 应用的 Policies 中添加一条
+   **Service Auth** 策略，Include 选择刚创建的 service token。两个值填入
+   上一步的 GitHub Secrets。这样推送链路有 Access service token 与
+   `ADMIN_API_TOKEN` 双层防护。
+   （备选：若账户未对 `*.workers.dev` 启用 Access，可把 `WORKER_ADMIN_URL`
+   改为 `https://clash-verge-rev.<子域>.workers.dev/v1/admin/resource`，
+   此时无需 service token，仅由 `ADMIN_API_TOKEN` 守门。但注意 workers.dev
+   整体被 GFW DNS 污染（实测 `clash-verge-rev.dongsy2003.workers.dev`
+   解析到 31.13.94.10 这类伪造地址，TCP 连接直接失败），大陆住宅网络的
+   runner 无法直连——这种网络环境下只能用上面的自定义域名方案。）
+5. 在 Cloudflare Worker 的 Variables and Secrets 添加 Secret
+   `ADMIN_API_TOKEN`（与 GitHub 侧相同的值）。
+6. `workflow_dispatch` 与 `schedule` 只在**默认分支**（`dev`）上的工作流文件
+   生效；该文件已合并到 dev。可在 Actions → Team Resource Push →
    Run workflow 手动跑一次验证：日志显示 `upstream HTTP status: 200` 且 PUT
    返回 `{"ok":true,...}` 即成功，客户端随后同步即可用。
 
