@@ -141,6 +141,12 @@ pub async fn create_profile(item: PrfItem, file_data: Option<String>) -> CmdResu
 /// 更新配置文件
 #[tauri::command]
 pub async fn update_profile(index: String, option: Option<PrfOption>) -> CmdResult {
+    if crate::team::is_managed_profile_uid(&index) {
+        return Err(coded_error(
+            "PROFILE_UPDATE_FAILED",
+            "managed profiles can only be updated by the team API",
+        ));
+    }
     match feat::update_profile(&index, option.as_ref(), true, true, true).await {
         Ok(_) => Ok(()),
         Err(e) => {
@@ -153,6 +159,12 @@ pub async fn update_profile(index: String, option: Option<PrfOption>) -> CmdResu
 /// 删除配置文件
 #[tauri::command]
 pub async fn delete_profile(index: String) -> CmdResult {
+    if crate::team::is_managed_profile_uid(&index) {
+        return Err(coded_error(
+            "PROFILE_DELETE_FAILED",
+            "managed profiles cannot be deleted from the profiles page",
+        ));
+    }
     let profile_write_guard = PROFILE_WRITE_LOCK.lock().await;
 
     let profiles = Config::profiles().await;
@@ -364,6 +376,12 @@ pub async fn patch_profiles_config_by_profile_index(profile_index: String) -> Cm
 /// 修改某个profile item的
 #[tauri::command]
 pub async fn patch_profile(index: String, profile: PrfItem) -> CmdResult {
+    if crate::team::is_managed_profile_uid(&index) {
+        return Err(coded_error(
+            "PROFILE_UPDATE_FAILED",
+            "managed profiles cannot be edited",
+        ));
+    }
     // 保存修改前检查是否有更新 update_interval
     let profiles = Config::profiles().await;
     let should_refresh_timer = if let Ok(old_profile) = profiles.latest_arc().get_item(&index)
@@ -409,6 +427,12 @@ pub async fn patch_profile(index: String, profile: PrfItem) -> CmdResult {
 /// 查看配置文件
 #[tauri::command]
 pub async fn view_profile(index: String) -> CmdResult {
+    if crate::team::is_managed_profile_uid(&index) {
+        return Err(coded_error(
+            "PROFILE_OPEN_FAILED",
+            "managed profile content is not exposed",
+        ));
+    }
     let profiles = Config::profiles().await;
     let profiles_ref = profiles.latest_arc();
     let file = profiles_ref
@@ -434,6 +458,12 @@ pub async fn view_profile(index: String) -> CmdResult {
 /// 读取配置文件内容
 #[tauri::command]
 pub async fn read_profile_file(index: String) -> CmdResult<String> {
+    if crate::team::is_managed_profile_uid(&index) {
+        return Err(coded_error(
+            "PROFILE_READ_FAILED",
+            "managed profile content is not exposed",
+        ));
+    }
     let item = {
         let profiles = Config::profiles().await;
         let profiles_ref = profiles.latest_arc();

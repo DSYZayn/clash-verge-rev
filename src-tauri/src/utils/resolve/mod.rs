@@ -75,6 +75,7 @@ pub fn resolve_setup_async() {
             init_auto_lightweight_boot(),
             init_auto_backup(),
             init_silent_updater(),
+            crate::team::init_background_sync(),
         );
 
         Handle::refresh_clash();

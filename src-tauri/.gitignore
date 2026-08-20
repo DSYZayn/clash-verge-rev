@@ -4,5 +4,8 @@
 gen/
 WixTools
 resources
+!resources/
+resources/*
+!resources/team-config.json
 sidecar
 

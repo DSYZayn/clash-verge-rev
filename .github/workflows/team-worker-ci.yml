@@ -1,0 +1,42 @@
+name: Team Worker CI
+
+on:
+  push:
+    paths:
+      - 'team-worker/**'
+      - '.github/workflows/team-worker-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+concurrency:
+  group: '${{ github.workflow }} - ${{ github.head_ref || github.ref }}'
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: team-worker
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Install Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24.19.0'
+          cache: 'npm'
+          cache-dependency-path: team-worker/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Placeholder bindings in wrangler.toml are enough for a dry run; a real
+      # deploy happens manually after filling in D1/KV ids and secrets.
+      - name: Wrangler dry run
+        run: npx wrangler deploy --dry-run

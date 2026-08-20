@@ -270,6 +270,30 @@ interface IProfilesConfig {
   items?: IProfileItem[]
 }
 
+interface ITeamQuota {
+  upload: number
+  download: number
+  total: number
+  expire: number
+}
+
+interface ITeamAccount {
+  userId?: string
+  email?: string
+  displayName?: string
+  team?: string
+  enabled: boolean
+  quota?: ITeamQuota
+}
+
+interface ITeamStatus {
+  configured: boolean
+  authenticated: boolean
+  account?: ITeamAccount
+  lastSyncAt?: number
+  managedProfileInstalled: boolean
+}
+
 interface IVergeTestItem {
   uid: string
   name?: string

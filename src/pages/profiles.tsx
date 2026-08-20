@@ -269,7 +269,9 @@ const ProfilePage = () => {
 
     const type1 = ['local', 'remote']
 
-    return items.filter((i) => i && type1.includes(i.type!))
+    return items.filter(
+      (i) => i && i.uid !== 'RTEAMMANAGED' && type1.includes(i.type!),
+    )
   }, [profiles])
 
   const currentActivatings = () => {

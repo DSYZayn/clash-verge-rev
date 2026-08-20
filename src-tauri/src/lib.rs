@@ -9,6 +9,7 @@ mod enhance;
 mod feat;
 mod module;
 mod process;
+mod team;
 pub mod utils;
 
 use crate::constants::files;
@@ -181,6 +182,11 @@ mod app_init {
             cmd::exit_app,
             cmd::get_network_interfaces_info,
             cmd::get_profiles,
+            cmd::get_team_status,
+            cmd::login_team,
+            cmd::refresh_team_account,
+            cmd::sync_team_profile,
+            cmd::logout_team,
             cmd::enhance_profiles,
             cmd::patch_profiles_config,
             cmd::view_profile,

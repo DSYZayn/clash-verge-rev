@@ -9,7 +9,8 @@
         "rules": "Rules",
         "logs": "Logs",
         "unlock": "Test",
-        "settings": "Settings"
+        "settings": "Settings",
+        "team": "Account"
       },
       "menu": {
         "reorderMode": "Menu reorder mode",
