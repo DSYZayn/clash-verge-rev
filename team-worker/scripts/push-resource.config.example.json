@@ -1,0 +1,5 @@
+{
+  "subscription_url": "https://YOUR-UPSTREAM.example.com/api/v1/...?token=REPLACE_ME",
+  "worker_base_url": "https://clash-verge-rev.YOUR-SUBDOMAIN.workers.dev",
+  "admin_token": "REPLACE_WITH_LONG_RANDOM_TOKEN"
+}

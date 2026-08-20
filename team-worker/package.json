@@ -1,0 +1,37 @@
+{
+  "name": "clash-verge-team-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "node scripts/ensure-resources.cjs && wrangler deploy",
+    "deploy:ci": "npm run config:prepare && wrangler deploy --config wrangler.generated.toml",
+    "config:prepare": "node --env-file-if-exists=.env scripts/prepare-wrangler-config.mjs",
+    "typecheck": "tsc --noEmit",
+    "db:migrate:local": "wrangler d1 migrations apply TEAM_DB --local",
+    "db:migrate:remote": "node scripts/ensure-resources.cjs",
+    "deploy:preview": "node scripts/ensure-resources.cjs && wrangler versions upload"
+  },
+  "cloudflare": {
+    "bindings": {
+      "UPSTREAM_SUBSCRIPTION_URL": {
+        "description": "Secret: the real upstream subscription URL, served only to authenticated team members"
+      },
+      "TEAM_DB": {
+        "description": "D1 database for team members and audit events (provisioned automatically on first deploy)"
+      },
+      "RESOURCE_CACHE": {
+        "description": "KV namespace caching the upstream subscription body (provisioned automatically on first deploy)"
+      }
+    }
+  },
+  "dependencies": {
+    "jose": "^6.1.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260426.1",
+    "typescript": "^6.0.0",
+    "wrangler": "^4.31.0"
+  }
+}

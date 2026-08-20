@@ -3,6 +3,7 @@ import ForkRightOutlinedIcon from '@mui/icons-material/ForkRightOutlined'
 import HomeOutlinedIcon from '@mui/icons-material/HomeOutlined'
 import LanguageOutlinedIcon from '@mui/icons-material/LanguageOutlined'
 import LockOpenOutlinedIcon from '@mui/icons-material/LockOpenOutlined'
+import PersonOutlineOutlinedIcon from '@mui/icons-material/PersonOutlineOutlined'
 import SettingsOutlinedIcon from '@mui/icons-material/SettingsOutlined'
 import SubjectOutlinedIcon from '@mui/icons-material/SubjectOutlined'
 import WifiOutlinedIcon from '@mui/icons-material/WifiOutlined'
@@ -25,6 +26,7 @@ import ProfilePage from './profiles'
 import ProxyPage from './proxies'
 import RulesPage from './rules'
 import SettingPage from './settings'
+import TeamPage from './team'
 import UnlockPage from './unlock'
 
 type NavigationItem = {
@@ -69,6 +71,11 @@ export const navItems: NavigationItem[] = [
     ...navigationItems.unlock,
     icon: [<LockOpenOutlinedIcon key="mui" />, <UnlockSvg key="svg" />],
     Component: UnlockPage,
+  },
+  {
+    ...navigationItems.team,
+    icon: [<PersonOutlineOutlinedIcon key="mui" />, <PersonOutlineOutlinedIcon key="svg" />],
+    Component: TeamPage,
   },
   {
     ...navigationItems.settings,

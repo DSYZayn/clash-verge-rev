@@ -1,0 +1,12 @@
+{
+  "enabled": false,
+  "api_base_url": "https://YOUR-ACCESS-APP.example.com",
+  "oauth_client_id": "",
+  "oauth_scopes": [],
+  "oauth_resource": "https://YOUR-ACCESS-APP.example.com",
+  "account_path": "/v1/desktop/account",
+  "profile_path": "/v1/desktop/profile",
+  "managed_profile_name": "Team Network",
+  "auto_activate": true,
+  "sync_interval_minutes": 360
+}

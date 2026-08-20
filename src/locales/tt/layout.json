@@ -9,7 +9,8 @@
         "rules": "Кагыйдәләр",
         "logs": "Логлар",
         "unlock": "Test",
-        "settings": "Көйләүләр"
+        "settings": "Көйләүләр",
+        "team": "Account"
       },
       "menu": {
         "reorderMode": "Menu reorder mode",

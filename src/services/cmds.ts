@@ -14,6 +14,26 @@ export async function getProfiles() {
   return invoke<IProfilesConfig>('get_profiles')
 }
 
+export async function getTeamStatus() {
+  return invoke<ITeamStatus>('get_team_status')
+}
+
+export async function loginTeam() {
+  return invoke<ITeamStatus>('login_team')
+}
+
+export async function refreshTeamAccount() {
+  return invoke<ITeamStatus>('refresh_team_account')
+}
+
+export async function syncTeamProfile() {
+  return invoke<ITeamStatus>('sync_team_profile')
+}
+
+export async function logoutTeam() {
+  return invoke<void>('logout_team')
+}
+
 export async function enhanceProfiles() {
   return (
     (await invoke<ValidationOutcome>('enhance_profiles')).status === 'valid'

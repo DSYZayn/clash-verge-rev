@@ -107,6 +107,7 @@ webpki-roots = "1.0.9"
 dark-light = { git = "https://github.com/rust-dark-light/dark-light" }
 bytes = "1.12.1"
 tokio-util = { version = "0.7.19", features = ["time"] }
+sha2 = "0.10.9"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.189"

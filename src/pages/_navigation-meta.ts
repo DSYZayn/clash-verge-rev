@@ -22,4 +22,8 @@ export const navigationItems = {
     label: 'layout.components.navigation.tabs.settings',
     path: '/settings',
   },
+  team: {
+    label: 'layout.components.navigation.tabs.team',
+    path: '/team',
+  },
 } as const

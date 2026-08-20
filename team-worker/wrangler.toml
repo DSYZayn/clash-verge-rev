@@ -1,0 +1,37 @@
+#:schema node_modules/wrangler/config-schema.json
+name = "clash-verge-rev"
+main = "src/index.ts"
+compatibility_date = "2026-08-20"
+
+# The first deploy publishes a <name>.workers.dev endpoint. Add a custom
+# domain later in the Cloudflare dashboard (Worker -> Settings -> Domains &
+# Routes); dashboard-managed routes survive redeploys because this file
+# declares no routes of its own.
+workers_dev = true
+
+# Bundle the D1 schema as text so a freshly provisioned, still-empty database
+# can initialize itself on the first authenticated request.
+rules = [{ type = "Text", globs = ["**/*.sql"], fallthrough = true }]
+
+# Every environment-specific value lives in the dashboard (Worker ->
+# Settings -> Variables and Secrets): TEAM_DOMAIN, ACCESS_AUD,
+# UPSTREAM_SUBSCRIPTION_URL, and optionally DEFAULT_TEAM_NAME /
+# CACHE_TTL_SECONDS (in-code defaults apply when unset). keep_vars
+# preserves them across redeploys; a [vars] section here would overwrite
+# the dashboard values on every deploy, so this file declares none.
+keep_vars = true
+
+# D1 and KV are provisioned automatically on every deploy:
+# scripts/ensure-resources.cjs finds or creates each resource by name and
+# pins the returned id into this file before wrangler uploads the Worker.
+[[d1_databases]]
+binding = "TEAM_DB"
+database_name = "clash-verge-team"
+migrations_dir = "migrations"
+
+[[kv_namespaces]]
+binding = "RESOURCE_CACHE"
+
+# The real subscription URL is a Worker secret and never enters source
+# control. Set it once in the dashboard (Worker -> Settings -> Variables and
+# Secrets) or run: npx wrangler secret put UPSTREAM_SUBSCRIPTION_URL

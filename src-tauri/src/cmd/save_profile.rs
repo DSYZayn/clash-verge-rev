@@ -17,6 +17,9 @@ use tokio::fs;
 /// 保存profiles的配置
 #[tauri::command]
 pub async fn save_profile_file(index: String, file_data: Option<String>) -> CmdResult<ValidationOutcome> {
+    if crate::team::is_managed_profile_uid(&index) {
+        return Err("managed profiles cannot be edited".into());
+    }
     let file_data = match file_data {
         Some(d) => d,
         None => return Ok(ValidationOutcome::Valid),

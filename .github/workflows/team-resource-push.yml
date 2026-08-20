@@ -1,0 +1,77 @@
+name: Team Resource Push
+
+# Fetches the upstream subscription from a SELF-HOSTED runner sitting in a
+# residential network (the upstream WAF blocks datacenter egress), then PUTs
+# the result into the team Worker (PUT /v1/admin/resource). Self-hosted runs
+# do not consume GitHub Actions minutes.
+#
+# Runner requirements:
+#   - registered on this repo with the "residential" label
+#     (Settings -> Actions -> Runners -> New self-hosted runner)
+#   - outbound HTTPS only; on Windows the "shell: bash" steps run in the
+#     Git-Bash environment that ships with the runner
+#
+# Required secrets in the team-production environment:
+#   UPSTREAM_SUBSCRIPTION_URL, WORKER_ADMIN_URL, ADMIN_API_TOKEN
+#
+# schedule and workflow_dispatch only fire when this file exists on the
+# default branch (dev). If the runner machine is offline, scheduled jobs
+# queue for up to 24h and run when it comes back; missed runs are harmless
+# because the Worker keeps serving the last pushed copy.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/30 * * * *'
+
+permissions: {}
+
+jobs:
+  push:
+    runs-on: [self-hosted, residential]
+    environment: team-production
+    steps:
+      - name: Fetch upstream subscription
+        shell: bash
+        env:
+          UPSTREAM_SUBSCRIPTION_URL: ${{ secrets.UPSTREAM_SUBSCRIPTION_URL }}
+        run: |
+          set -euo pipefail
+          : "${UPSTREAM_SUBSCRIPTION_URL:?set the UPSTREAM_SUBSCRIPTION_URL secret in the team-production environment}"
+          http_code=$(curl -sS -L -D headers.txt -o upstream.yaml -w '%{http_code}' \
+            -A 'clash-verge/v2.4.3' "$UPSTREAM_SUBSCRIPTION_URL" || true)
+          echo "upstream HTTP status: $http_code"
+          if [ "$http_code" != '200' ]; then
+            echo '::error::upstream fetch failed; body head follows (identifies WAF block pages)'
+            head -c 300 upstream.yaml || true
+            exit 1
+          fi
+          userinfo=$(grep -i '^subscription-userinfo:' headers.txt | tail -1 | cut -d' ' -f2- | tr -d '\r' || true)
+          disposition=$(grep -i '^content-disposition:' headers.txt | tail -1 | cut -d' ' -f2- | tr -d '\r' || true)
+          echo "USERINFO=$userinfo" >> "$GITHUB_ENV"
+          echo "DISPOSITION=$disposition" >> "$GITHUB_ENV"
+          echo "fetched $(wc -c < upstream.yaml) bytes; subscription-userinfo: ${userinfo:-<none>}"
+
+      - name: Push to team worker
+        shell: bash
+        env:
+          WORKER_ADMIN_URL: ${{ secrets.WORKER_ADMIN_URL }}
+          ADMIN_API_TOKEN: ${{ secrets.ADMIN_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          : "${WORKER_ADMIN_URL:?set the WORKER_ADMIN_URL secret (https://<worker>.workers.dev/v1/admin/resource)}"
+          : "${ADMIN_API_TOKEN:?set the ADMIN_API_TOKEN secret (same value as the Worker secret)}"
+          args=(-sS -X PUT
+            -H "Authorization: Bearer $ADMIN_API_TOKEN"
+            -H 'Content-Type: application/yaml'
+            --data-binary @upstream.yaml)
+          if [ -n "${USERINFO:-}" ]; then args+=(-H "x-subscription-userinfo: $USERINFO"); fi
+          if [ -n "${DISPOSITION:-}" ]; then args+=(-H "x-content-disposition: $DISPOSITION"); fi
+          curl "${args[@]}" "$WORKER_ADMIN_URL"
+          echo
+
+      # Self-hosted runners reuse the workspace: never leave the downloaded
+      # subscription body or response headers on disk after the job.
+      - name: Clean up subscription artifacts
+        if: always()
+        shell: bash
+        run: rm -f upstream.yaml headers.txt
