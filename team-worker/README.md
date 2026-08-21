@@ -83,6 +83,11 @@ Clash 配置发给桌面端。真实订阅 URL 只存在于 Worker Secret，客�
   Tailnet ID。
 - Tailscale OAuth token 请求会按操作场景发送 `auth_keys` 或 `devices:core`，并带上
   `tag:team-user` 或 `tag:team-admin`；两个 tag 都必须在 OAuth client 的授权范围内。
+  另外，client 同时持有两个 tag 而每次只申请其中一个属于"子集申请"：Tailscale 要求
+  被申请的 tag 在策略文件 `tagOwners` 中由 client 持有的某个 tag 所拥有，否则 token
+  端点返回 400 `requested tags ... are invalid or not permitted`。标准做法是让每个
+  tag 拥有自身：`"tag:team-user": ["autogroup:member", "tag:team-user"]`、
+  `"tag:team-admin": ["autogroup:admin", "tag:team-admin"]`。
 - `/admin` 与 `/v1/admin/*` 只接受 Access JWT 中与 `ADMIN_EMAIL` 完全匹配（不区分大小写）
   的邮箱；D1 的 `tailscale_role` 只用于 Tailscale tag，不构成管理后台权限。
 - Tailscale 前置操作：在 Tailscale Admin Console 的 OAuth clients 中创建 client，开启
