@@ -298,8 +298,17 @@ fn tailscale_program() -> &'static str {
     if cfg!(windows) { "tailscale.exe" } else { "tailscale" }
 }
 
+fn tailscale_command() -> Command {
+    let mut command = Command::new(tailscale_program());
+    // CREATE_NO_WINDOW: spawning the console-subsystem tailscale CLI from the
+    // GUI app would otherwise flash a console window on every status poll.
+    #[cfg(windows)]
+    command.creation_flags(0x08000000);
+    command
+}
+
 async fn tailscale_output(args: &[&str]) -> Result<std::process::Output> {
-    Command::new(tailscale_program())
+    tailscale_command()
         .args(args)
         .stdin(Stdio::null())
         .output()
@@ -382,7 +391,7 @@ fn create_tailscale_key_file(key: &str) -> Result<PathBuf> {
 async fn tailscale_up(key: &str) -> Result<()> {
     let path = create_tailscale_key_file(key)?;
     let path_arg = format!("--auth-key=file:{}", path.to_string_lossy());
-    let result = Command::new(tailscale_program())
+    let result = tailscale_command()
         .arg("up")
         .arg(path_arg)
         .args(if cfg!(windows) { &["--unattended"][..] } else { &[][..] })
@@ -400,17 +409,33 @@ async fn tailscale_up(key: &str) -> Result<()> {
     Ok(())
 }
 
+/// error_for_status() discards the response body, but the Worker puts the
+/// diagnostic (e.g. the upstream Tailscale API message) in it - keep it.
+async fn checked_response(response: reqwest::Response) -> Result<reqwest::Response> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let detail: String = body.trim().chars().take(500).collect();
+    if detail.is_empty() {
+        bail!("team Worker request failed: {status}");
+    }
+    bail!("team Worker request failed: {status}: {detail}")
+}
+
 async fn team_post(path: &str, body: serde_json::Value) -> Result<reqwest::Response> {
     let config = load_config()?;
     let session = usable_session().await?;
-    reqwest::Client::new()
+    let response = reqwest::Client::new()
         .post(endpoint(&config.api_base_url, path)?)
         .bearer_auth(&session.access_token)
         .header("x-team-device", device_id()?)
         .json(&body)
         .send()
         .await
-        .context("team Worker request failed")
+        .context("team Worker request failed")?;
+    checked_response(response).await
 }
 
 async fn tailscale_reconcile(
@@ -435,7 +460,6 @@ async fn tailscale_reconcile(
         }),
     )
     .await?
-    .error_for_status()?
     .json::<TailscaleReconcileResponse>()
     .await
     .context("invalid Tailscale reconcile response")
@@ -467,11 +491,9 @@ async fn metadata(config: &TeamConfig) -> Result<OAuthMetadata> {
     // Managed OAuth serves the discovery document on the Access-protected
     // application domain itself; no override is needed.
     let url = endpoint(&config.api_base_url, "/.well-known/oauth-authorization-server")?;
-    reqwest::Client::new()
-        .get(url)
-        .send()
+    let response = reqwest::Client::new().get(url).send().await?;
+    checked_response(response)
         .await?
-        .error_for_status()?
         .json()
         .await
         .context("invalid OAuth discovery metadata")
@@ -493,8 +515,8 @@ async fn register_client(metadata: &OAuthMetadata, redirect_uri: &str, resource:
             "resource": resource
         }))
         .send()
-        .await?
-        .error_for_status()?;
+        .await?;
+    let response = checked_response(response).await?;
     Ok(response.json::<ClientRegistration>().await?.client_id)
 }
 
@@ -605,8 +627,8 @@ pub async fn login() -> Result<TeamStatus> {
         .post(&metadata.token_endpoint)
         .form(&token_form)
         .send()
-        .await?
-        .error_for_status()?
+        .await?;
+    let token = checked_response(token).await?
         .json::<OAuthTokenResponse>()
         .await?;
     save_session(&TeamSession {
@@ -640,8 +662,8 @@ async fn usable_session() -> Result<TeamSession> {
         .post(&session.token_endpoint)
         .form(&token_form)
         .send()
-        .await?
-        .error_for_status()?
+        .await?;
+    let token = checked_response(token).await?
         .json::<OAuthTokenResponse>()
         .await?;
     session.access_token = token.access_token;
@@ -704,8 +726,7 @@ pub async fn tailscale_connect() -> Result<TeamStatus> {
             "ephemeral": true,
         }),
     )
-    .await?
-    .error_for_status()?;
+    .await?;
     let issued = response.json::<TailscaleKeyResponse>().await?;
     if issued.key.trim().is_empty() {
         bail!("Worker returned an empty Tailscale authorization key")
@@ -751,9 +772,7 @@ pub async fn tailscale_logout() -> Result<TeamStatus> {
             .and_then(|value| value.node_id.clone())
     });
     let cli_result = tailscale_output(&["logout"]).await;
-    let worker_result = team_post(TAILSCALE_LOGOUT_PATH, serde_json::json!({ "nodeId": node_id }))
-        .await?
-        .error_for_status();
+    let worker_result = team_post(TAILSCALE_LOGOUT_PATH, serde_json::json!({ "nodeId": node_id })).await;
     if let Err(error) = cli_result {
         // Still notify the Worker so its device record is revoked when the
         // local CLI is unavailable or already logged out.
@@ -799,13 +818,14 @@ pub async fn logout() -> Result<()> {
 pub async fn refresh_account() -> Result<TeamStatus> {
     let config = load_config()?;
     let mut session = usable_session().await?;
-    let mut account = reqwest::Client::new()
+    let account_response = reqwest::Client::new()
         .get(endpoint(&config.api_base_url, &config.account_path)?)
         .bearer_auth(&session.access_token)
         .header("x-team-device", device_id()?)
         .send()
+        .await?;
+    let mut account = checked_response(account_response)
         .await?
-        .error_for_status()?
         .json::<TeamAccount>()
         .await?;
     if account.quota.is_none() {
@@ -850,7 +870,7 @@ pub async fn sync_managed_profile() -> Result<TeamStatus> {
         save_session(&session)?;
         return status().await;
     }
-    let response = response.error_for_status()?;
+    let response = checked_response(response).await?;
     let headers = response.headers().clone();
     let data = response.text().await?;
     let yaml = serde_yaml_ng::from_str::<Mapping>(&data).context("managed profile is not valid YAML")?;
