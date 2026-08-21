@@ -15,6 +15,26 @@ use std::{
 #[derive(Default, Debug, Clone)]
 pub struct IClashTemp(pub Mapping);
 
+const DEFAULT_TUN_ROUTE_EXCLUDE_ADDRESS: [&str; 2] = ["100.64.0.0/10", "fd7a:115c:a1e0::/48"];
+
+fn ensure_default_tun_route_exclude_address(tun_config: &mut Mapping) {
+    let route_exclude_address = tun_config
+        .entry("route-exclude-address".into())
+        .or_insert_with(|| Value::Sequence(Vec::new()));
+    if let Some(route_exclude_address) = route_exclude_address.as_sequence_mut() {
+        for address in DEFAULT_TUN_ROUTE_EXCLUDE_ADDRESS {
+            if !route_exclude_address
+                .iter()
+                .any(|value| value.as_str() == Some(address))
+            {
+                route_exclude_address.push(address.into());
+            }
+        }
+    } else {
+        *route_exclude_address = DEFAULT_TUN_ROUTE_EXCLUDE_ADDRESS.to_vec().into();
+    }
+}
+
 impl IClashTemp {
     pub async fn new() -> Self {
         let clash_path_result = dirs::clash_path();
@@ -31,6 +51,10 @@ impl IClashTemp {
                     if !map.contains_key(&key) {
                         map.insert(key, value);
                     }
+                }
+
+                if let Some(Value::Mapping(tun_config)) = map.get_mut("tun") {
+                    ensure_default_tun_route_exclude_address(tun_config);
                 }
 
                 // 确保 secret 字段存在且不为空
@@ -61,6 +85,10 @@ impl IClashTemp {
         tun_config.insert("strict-route".into(), false.into());
         tun_config.insert("auto-detect-interface".into(), true.into());
         tun_config.insert("dns-hijack".into(), tun_const::DNS_HIJACK.into());
+        tun_config.insert(
+            "route-exclude-address".into(),
+            DEFAULT_TUN_ROUTE_EXCLUDE_ADDRESS.to_vec().into(),
+        );
 
         #[cfg(not(target_os = "windows"))]
         map.insert("redir-port".into(), network::ports::DEFAULT_REDIR.into());

@@ -29,6 +29,15 @@ import { StackModeSwitch } from './stack-mode-switch'
 
 const OS = getSystem()
 
+const DEFAULT_ROUTE_EXCLUDE_ADDRESS = ['100.64.0.0/10', 'fd7a:115c:a1e0::/48']
+
+const mergeRouteExcludeAddress = (addresses?: string[]) => [
+  ...(addresses ?? []),
+  ...DEFAULT_ROUTE_EXCLUDE_ADDRESS.filter(
+    (address) => !addresses?.includes(address),
+  ),
+]
+
 const splitRouteExcludeAddress = (value: string) =>
   value
     .split(/[,\n;\r]+/)
@@ -75,9 +84,9 @@ export function TunViewer({ ref }: { ref?: Ref<DialogRef> }) {
         stack: clash?.tun.stack ?? 'gvisor',
         device: clash?.tun.device ?? (OS === 'macos' ? 'utun1024' : 'Mihomo'),
         autoRoute: nextAutoRoute,
-        routeExcludeAddress: (clash?.tun['route-exclude-address'] ?? []).join(
-          ',',
-        ),
+        routeExcludeAddress: mergeRouteExcludeAddress(
+          clash?.tun['route-exclude-address'],
+        ).join(','),
         autoRedirect: computedAutoRedirect,
         autoDetectInterface: clash?.tun['auto-detect-interface'] ?? true,
         dnsHijack: clash?.tun['dns-hijack'] ?? ['any:53'],
@@ -158,7 +167,9 @@ export function TunViewer({ ref }: { ref?: Ref<DialogRef> }) {
                   : {}),
                 'auto-detect-interface': true,
                 'dns-hijack': ['any:53'],
-                'route-exclude-address': [],
+                'route-exclude-address': mergeRouteExcludeAddress(
+                  clash?.tun['route-exclude-address'],
+                ),
                 'strict-route': false,
                 mtu: 1500,
               }
@@ -166,7 +177,9 @@ export function TunViewer({ ref }: { ref?: Ref<DialogRef> }) {
                 stack: 'gvisor',
                 device: OS === 'macos' ? 'utun1024' : 'Mihomo',
                 autoRoute: true,
-                routeExcludeAddress: '',
+                routeExcludeAddress: mergeRouteExcludeAddress(
+                  clash?.tun['route-exclude-address'],
+                ).join(','),
                 autoRedirect: false,
                 autoDetectInterface: true,
                 dnsHijack: ['any:53'],

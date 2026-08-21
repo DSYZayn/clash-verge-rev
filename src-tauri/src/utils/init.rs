@@ -345,6 +345,8 @@ pub(super) async fn init_dns_config() -> Result<()> {
                 Value::String("localhost.ptlogin2.qq.com".into()),
                 Value::String("*.msftncsi.com".into()),
                 Value::String("www.msftconnecttest.com".into()),
+                Value::String("+.ts.net".into()),
+                Value::String("ts.net".into()),
             ]),
         ),
         (
@@ -368,7 +370,10 @@ pub(super) async fn init_dns_config() -> Result<()> {
         ("fallback".into(), Value::Sequence(vec![])),
         (
             "nameserver-policy".into(),
-            Value::Mapping(serde_yaml_ng::Mapping::new()),
+            Value::Mapping(serde_yaml_ng::Mapping::from_iter([
+                ("+.ts.net".into(), "100.100.100.100".into()),
+                ("ts.net".into(), "100.100.100.100".into()),
+            ])),
         ),
         (
             "proxy-server-nameserver".into(),

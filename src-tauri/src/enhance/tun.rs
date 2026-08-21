@@ -10,6 +10,23 @@ macro_rules! revise {
     };
 }
 
+const DEFAULT_ROUTE_EXCLUDE_ADDRESS: [&str; 2] = ["100.64.0.0/10", "fd7a:115c:a1e0::/48"];
+
+fn ensure_route_exclude_address(tun: &mut Mapping) {
+    let value = tun
+        .entry(Value::from("route-exclude-address"))
+        .or_insert_with(|| Value::Sequence(Vec::new()));
+    if let Some(addresses) = value.as_sequence_mut() {
+        for address in DEFAULT_ROUTE_EXCLUDE_ADDRESS {
+            if !addresses.iter().any(|item| item.as_str() == Some(address)) {
+                addresses.push(Value::from(address));
+            }
+        }
+    } else {
+        *value = Value::Sequence(DEFAULT_ROUTE_EXCLUDE_ADDRESS.into_iter().map(Value::from).collect());
+    }
+}
+
 pub fn use_tun(mut config: Mapping, enable: bool) -> Mapping {
     let tun_key = Value::from("tun");
     let tun_val = config.get(&tun_key);
@@ -64,6 +81,9 @@ pub fn use_tun(mut config: Mapping, enable: bool) -> Mapping {
         });
     }
 
+    if enable {
+        ensure_route_exclude_address(&mut tun_val);
+    }
     revise!(tun_val, "enable", enable);
     revise!(config, "tun", tun_val);
 

@@ -1,4 +1,6 @@
 import CloudSyncOutlinedIcon from '@mui/icons-material/CloudSyncOutlined'
+import DeviceHubOutlinedIcon from '@mui/icons-material/DeviceHubOutlined'
+import LaunchOutlinedIcon from '@mui/icons-material/LaunchOutlined'
 import LoginOutlinedIcon from '@mui/icons-material/LoginOutlined'
 import LogoutOutlinedIcon from '@mui/icons-material/LogoutOutlined'
 import PersonOutlineOutlinedIcon from '@mui/icons-material/PersonOutlineOutlined'
@@ -21,10 +23,13 @@ import { useCallback, useState } from 'react'
 import { BasePage } from '@/components/base'
 import {
   activateTeamProfile,
+  connectTailscale,
   getTeamStatus,
   loginTeam,
   logoutTeam,
+  logoutTailscale,
   refreshTeamAccount,
+  refreshTailscale,
   syncTeamProfile,
 } from '@/services/cmds'
 import { useQuery } from '@/services/query-client'
@@ -84,6 +89,9 @@ const TeamPage = () => {
   const percent = quota?.total
     ? Math.min(100, Math.round((used / quota.total) * 100))
     : 0
+  const tailscale = data?.tailscale
+  const tailscaleDate = (value?: number) =>
+    value ? dayjs(value * 1000).format('YYYY-MM-DD HH:mm') : '未提供'
 
   return (
     <BasePage title="团队账户">
@@ -193,6 +201,90 @@ const TeamPage = () => {
               {isFetching
                 ? '正在读取状态…'
                 : `受管配置：${data?.managedProfileInstalled ? '已安装' : '未安装'}；最后同步：${data?.lastSyncAt ? dayjs(data.lastSyncAt * 1000).format('YYYY-MM-DD HH:mm:ss') : '从未'}`}
+            </Typography>
+          </CardContent>
+        </Card>
+
+        <Card variant="outlined">
+          <CardContent>
+            <Stack direction="row" spacing={2} sx={{ alignItems: 'center' }}>
+              <DeviceHubOutlinedIcon fontSize="large" />
+              <Box sx={{ flex: 1 }}>
+                <Typography variant="h6">Tailscale</Typography>
+                <Typography color="text.secondary">
+                  {tailscale?.installed
+                    ? `版本 ${tailscale.version || '未知'}`
+                    : '未检测到本机 Tailscale CLI'}
+                </Typography>
+              </Box>
+              <Chip
+                color={tailscale?.loggedIn ? 'success' : 'default'}
+                label={tailscale?.loggedIn ? '已连接' : '未连接'}
+              />
+            </Stack>
+
+            {tailscale?.installed && tailscale.loggedIn && (
+              <>
+                <Divider sx={{ my: 2 }} />
+                <Stack spacing={0.75}>
+                  <Typography>设备：{tailscale.deviceName || '未知'}</Typography>
+                  <Typography>IP：{tailscale.ipv4 || '未分配'}</Typography>
+                  <Typography>
+                    在线：{tailscale.online ? '是' : '否'}；角色：{tailscale.role || '未提供'}；Tag：
+                    {tailscale.tag || '未提供'}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Key 签发：{tailscaleDate(tailscale.keyIssuedAt)}；有效期至：
+                    {tailscaleDate(tailscale.keyExpiresAt)}
+                  </Typography>
+                </Stack>
+              </>
+            )}
+
+            <Divider sx={{ my: 2 }} />
+            <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap' }}>
+              {!tailscale?.loggedIn ? (
+                <Button
+                  variant="contained"
+                  startIcon={action === 'tailscale-connect' ? <CircularProgress size={16} /> : <DeviceHubOutlinedIcon />}
+                  disabled={!data?.authenticated || !tailscale?.installed || Boolean(action)}
+                  onClick={() => run('tailscale-connect', connectTailscale, 'Tailscale 连接失败：')}
+                >
+                  连接
+                </Button>
+              ) : (
+                <>
+                  <Button
+                    startIcon={action === 'tailscale-refresh' ? <CircularProgress size={16} /> : <CloudSyncOutlinedIcon />}
+                    disabled={Boolean(action)}
+                    onClick={() => run('tailscale-refresh', refreshTailscale, 'Tailscale 刷新失败：')}
+                  >
+                    刷新
+                  </Button>
+                  <Button
+                    color="inherit"
+                    startIcon={<LogoutOutlinedIcon />}
+                    disabled={Boolean(action)}
+                    onClick={() => run('tailscale-logout', logoutTailscale, 'Tailscale 退出失败：')}
+                  >
+                    退出登录
+                  </Button>
+                </>
+              )}
+              <Button
+                variant="text"
+                endIcon={<LaunchOutlinedIcon />}
+                onClick={() => window.open('https://tailscale.com/download', '_blank', 'noopener,noreferrer')}
+              >
+                官方下载
+              </Button>
+            </Stack>
+            <Typography variant="caption" color="text.secondary" sx={{ mt: 2, display: 'block' }}>
+              {!data?.authenticated
+                ? '请先完成团队账户认证，再连接 Tailscale。'
+                : tailscale?.installed
+                  ? '状态来自本机 tailscale CLI。'
+                  : '请从 Tailscale 官方下载并安装客户端。'}
             </Typography>
           </CardContent>
         </Card>

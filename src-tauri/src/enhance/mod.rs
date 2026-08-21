@@ -666,6 +666,52 @@ fn ensure_fake_ip_range6(dns: &mut Mapping) {
     }
 }
 
+const TAILSCALE_BLACKLIST_FILTERS: [&str; 2] = ["+.ts.net", "ts.net"];
+
+const TAILSCALE_NAMESERVER_POLICY: [(&str, &str); 2] = [("+.ts.net", "100.100.100.100"), ("ts.net", "100.100.100.100")];
+
+fn ensure_tailscale_dns(dns: &mut Mapping) {
+    let is_fake_ip = dns
+        .get("enhanced-mode")
+        .and_then(Value::as_str)
+        .map(|mode| mode == "fake-ip")
+        .unwrap_or(true);
+    let filter_mode = dns
+        .get("fake-ip-filter-mode")
+        .and_then(Value::as_str)
+        .unwrap_or("blacklist");
+
+    let filters_to_add = if filter_mode == "blacklist" {
+        &TAILSCALE_BLACKLIST_FILTERS[..]
+    } else {
+        &[][..]
+    };
+    if is_fake_ip && !filters_to_add.is_empty() {
+        let filters = dns
+            .entry("fake-ip-filter".into())
+            .or_insert_with(|| Value::Sequence(Vec::new()));
+        if let Some(filters) = filters.as_sequence_mut() {
+            for &filter in filters_to_add {
+                if !filters.iter().any(|value| value.as_str() == Some(filter)) {
+                    filters.push(Value::String(filter.into()));
+                }
+            }
+        }
+    }
+
+    let policy = dns
+        .entry("nameserver-policy".into())
+        .or_insert_with(|| Value::Mapping(Mapping::new()));
+    let Some(policy) = policy.as_mapping_mut() else {
+        return;
+    };
+    for (domain, nameserver) in TAILSCALE_NAMESERVER_POLICY {
+        policy
+            .entry(domain.into())
+            .or_insert_with(|| Value::String(nameserver.into()));
+    }
+}
+
 async fn apply_dns_settings(mut config: Mapping, enable_dns_settings: bool) -> Mapping {
     if enable_dns_settings && let Ok(app_dir) = dirs::app_home_dir() {
         let dns_path = app_dir.join(constants::files::DNS_CONFIG);
@@ -685,12 +731,14 @@ async fn apply_dns_settings(mut config: Mapping, enable_dns_settings: bool) -> M
                 if let Some(dns_mapping) = dns_value.as_mapping() {
                     let mut dns_mapping = dns_mapping.clone();
                     ensure_fake_ip_range6(&mut dns_mapping);
+                    ensure_tailscale_dns(&mut dns_mapping);
                     config.insert("dns".into(), dns_mapping.into());
                     logging!(info, Type::Core, "apply dns_config.yaml (dns section)");
                 }
             } else {
                 let mut dns_config = dns_config;
                 ensure_fake_ip_range6(&mut dns_config);
+                ensure_tailscale_dns(&mut dns_config);
                 config.insert("dns".into(), dns_config.into());
                 logging!(info, Type::Core, "apply dns_config.yaml");
             }

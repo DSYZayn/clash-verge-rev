@@ -2,13 +2,15 @@ import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose'
 
 import schemaSql from '../migrations/0001_init.sql'
 import devicesSql from '../migrations/0002_devices.sql'
+import tailscaleSql from '../migrations/0003_tailscale.sql'
+import { ADMIN_HTML } from './admin'
 
 // D1 exec treats each input line as its own statement: a pretty-printed
 // multi-line CREATE TABLE fails with "incomplete input". Flatten each
 // migration into a single line; the schema contains no string literals, so
 // collapsing whitespace is safe. Strip `--` comments first: once flattened,
 // everything after a comment marker would become part of that comment.
-const schemaBatch = [schemaSql, devicesSql]
+const schemaBatch = [schemaSql, devicesSql, tailscaleSql]
   .map((sql) =>
     sql
       .replace(/--[^\n]*/g, '')
@@ -26,6 +28,10 @@ interface Env {
   CACHE_TTL_SECONDS?: string
   UPSTREAM_SUBSCRIPTION_URL?: string
   ADMIN_API_TOKEN?: string
+  TAILSCALE_TAILNET?: string
+  TAILSCALE_OAUTH_CLIENT_ID?: string
+  TAILSCALE_OAUTH_CLIENT_SECRET?: string
+  ADMIN_EMAIL?: string
 }
 
 interface UserRow {
@@ -38,6 +44,7 @@ interface UserRow {
   quota_download: number | null
   quota_total: number | null
   quota_expire: number | null
+  tailscale_role: 'user' | 'admin'
 }
 
 interface CachedResource {
@@ -90,25 +97,78 @@ async function healUsersTable(env: Env) {
     ['quota_download', 'INTEGER'],
     ['quota_total', 'INTEGER'],
     ['quota_expire', 'INTEGER'],
+    ['tailscale_role', "TEXT NOT NULL DEFAULT 'user'"],
     ['created_at', 'TEXT'],
     ['updated_at', 'TEXT'],
   ]
   for (const [name, type] of columns) {
     if (!existing.has(name))
-      await env.TEAM_DB.exec(`ALTER TABLE users ADD COLUMN ${name} ${type}`)
+      await addColumnIfMissing(env, 'users', name, type)
+  }
+
+  // 0003 deliberately keeps its DDL idempotent. This also repairs databases
+  // where migrations were recorded before one of the columns was added.
+  await healTable(env, 'tailscale_key_issuances', [
+    ['access_subject', 'TEXT NOT NULL DEFAULT \'\''],
+    ['team_device_id', 'TEXT'],
+    ['key_hash', 'TEXT NOT NULL DEFAULT \'\''],
+    ['role', "TEXT NOT NULL DEFAULT 'user'"],
+    ['tag', "TEXT NOT NULL DEFAULT 'tag:team-user'"],
+    ['issued_at', 'INTEGER NOT NULL DEFAULT 0'],
+    ['expires_at', 'INTEGER NOT NULL DEFAULT 0'],
+    ['used_at', 'INTEGER'],
+    ['revoked_at', 'INTEGER'],
+    ['created_at', 'TEXT'],
+  ])
+  await healTable(env, 'tailscale_devices', [
+    ['access_subject', "TEXT NOT NULL DEFAULT ''"],
+    ['team_device_id', 'TEXT'],
+    ['hostname', 'TEXT'],
+    ['ipv4', 'TEXT'],
+    ['ipv6', 'TEXT'],
+    ['role', "TEXT NOT NULL DEFAULT 'user'"],
+    ['tag', "TEXT NOT NULL DEFAULT 'tag:team-user'"],
+    ['online', 'INTEGER NOT NULL DEFAULT 0'],
+    ['last_seen', 'INTEGER NOT NULL DEFAULT 0'],
+    ['revoked_at', 'INTEGER'],
+    ['created_at', 'TEXT'],
+    ['updated_at', 'TEXT'],
+  ])
+}
+
+async function healTable(
+  env: Env,
+  table: string,
+  columns: Array<[string, string]>,
+) {
+  const { results } = await env.TEAM_DB.prepare(`PRAGMA table_info(${table})`).all<{ name: string }>()
+  const existing = new Set(results.map((row) => row.name))
+  for (const [name, type] of columns) {
+    if (!existing.has(name))
+      await addColumnIfMissing(env, table, name, type)
+  }
+}
+
+async function addColumnIfMissing(
+  env: Env,
+  table: string,
+  name: string,
+  type: string,
+) {
+  try {
+    await env.TEAM_DB.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`)
+  } catch (error) {
+    // Another Worker isolate may have added the column after our PRAGMA read.
+    // SQLite has no portable ADD COLUMN IF NOT EXISTS syntax, so tolerate only
+    // that specific race and surface every other schema error.
+    if (!/duplicate column name/i.test(describeError(error))) throw error
   }
 }
 
 function ensureSchema(env: Env) {
   schemaInit ??= (async () => {
     await env.TEAM_DB.exec(schemaBatch)
-    try {
-      await healUsersTable(env)
-    } catch (error) {
-      // Advisory only: schemaSql is the authoritative shape. If a stale
-      // table cannot be retrofitted, later queries surface the real gap.
-      console.error('schema self-heal failed:', describeError(error))
-    }
+    await healUsersTable(env)
   })().catch((error: unknown) => {
     schemaInit = undefined
     throw error
@@ -170,7 +230,8 @@ async function getUser(
 
   const user = await env.TEAM_DB.prepare(
     `SELECT access_subject, email, display_name, team_name, enabled,
-            quota_upload, quota_download, quota_total, quota_expire
+            quota_upload, quota_download, quota_total, quota_expire,
+            COALESCE(tailscale_role, 'user') AS tailscale_role
        FROM users
       WHERE access_subject = ?1 OR (?2 IS NOT NULL AND lower(email) = lower(?2))
       ORDER BY CASE WHEN access_subject = ?1 THEN 0 ELSE 1 END
@@ -378,6 +439,314 @@ async function audit(env: Env, user: UserRow, eventType: string) {
 
 const ONLINE_WINDOW_SECONDS = 600
 
+const TAILSCALE_API = 'https://api.tailscale.com/api/v2'
+
+interface TailscaleKeyResponse {
+  id: string
+  key: string
+  created: string
+  expires: string
+}
+
+type TailscaleScope = 'auth_keys' | 'devices:core'
+
+function tailscaleConfig(env: Env) {
+  if (!env.TAILSCALE_TAILNET || !env.TAILSCALE_OAUTH_CLIENT_ID || !env.TAILSCALE_OAUTH_CLIENT_SECRET)
+    throw new Response('Tailscale is not configured', { status: 503 })
+  return {
+    // Tailscale API v2 accepts the Tailnet ID (the recommended identifier)
+    // in this path. Keep it opaque: do not parse it as a DNS name or append
+    // a domain suffix. encodeURIComponent is only for path-segment safety.
+    tailnetId: env.TAILSCALE_TAILNET,
+    clientId: env.TAILSCALE_OAUTH_CLIENT_ID,
+    clientSecret: env.TAILSCALE_OAUTH_CLIENT_SECRET,
+  }
+}
+
+function safeTailscaleMessage(body: string, secret?: string) {
+  let text = body.replace(/\s+/g, ' ').trim().slice(0, 500)
+  text = text
+    .replace(/tskey-[A-Za-z0-9._-]+/g, '[redacted-auth-key]')
+    .replace(/("?(?:key|auth[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret)"?\s*[:=]\s*")([^"\\]+)/gi, '$1[redacted-secret]')
+  return secret && text ? text.split(secret).join('[redacted]') : text
+}
+
+async function tailscaleAccessToken(
+  env: Env,
+  scope: TailscaleScope,
+  tags: string[],
+) {
+  const config = tailscaleConfig(env)
+  if (tags.length === 0)
+    throw new Response('Tailscale tags are required for this request', { status: 500 })
+  const form = new URLSearchParams({
+    grant_type: 'client_credentials',
+    scope,
+    tags: tags.join(' '),
+  })
+  let response: Response
+  try {
+    response = await fetch(`${TAILSCALE_API}/oauth/token`, {
+      method: 'POST',
+      headers: {
+        authorization: `Basic ${btoa(`${config.clientId}:${config.clientSecret}`)}`,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: form,
+    })
+  } catch (error) {
+    console.error('Tailscale OAuth token request failed:', describeError(error))
+    throw new Response('Tailscale OAuth service is unreachable', { status: 502 })
+  }
+  if (!response.ok) {
+    const body = await response.text().catch(() => '')
+    console.error('Tailscale OAuth token request failed:', response.status)
+    throw new Response(JSON.stringify({
+      error: 'Tailscale API error',
+      tailscale: { status: response.status, message: safeTailscaleMessage(body, config.clientSecret) || response.statusText },
+    }), { status: 502, headers: { 'content-type': 'application/json' } })
+  }
+  let data: { access_token?: string }
+  try {
+    data = await response.json() as { access_token?: string }
+  } catch {
+    throw new Response('Tailscale OAuth response is invalid', { status: 502 })
+  }
+  if (!data.access_token) throw new Response('Tailscale OAuth response did not contain an access token', { status: 502 })
+  return { token: data.access_token, config }
+}
+
+async function tailscaleRequest<T>(
+  env: Env,
+  path: string,
+  scope: TailscaleScope,
+  tags: string[],
+  init: RequestInit = {},
+) {
+  const { token } = await tailscaleAccessToken(env, scope, tags)
+  const headers = new Headers(init.headers)
+  headers.set('authorization', `Bearer ${token}`)
+  if (init.body && !headers.has('content-type')) headers.set('content-type', 'application/json')
+  let response: Response
+  try {
+    response = await fetch(`${TAILSCALE_API}${path}`, { ...init, headers })
+  } catch (error) {
+    console.error(`Tailscale API ${init.method ?? 'GET'} ${path} request failed:`, describeError(error))
+    throw new Response('Tailscale API is unreachable', { status: 502 })
+  }
+  if (!response.ok) {
+    const body = await response.text().catch(() => '')
+    const message = safeTailscaleMessage(body, env.TAILSCALE_OAUTH_CLIENT_SECRET)
+    console.error(`Tailscale API ${init.method ?? 'GET'} ${path} failed: ${response.status} ${message}`)
+    throw new Response(JSON.stringify({
+      error: 'Tailscale API error',
+      tailscale: { status: response.status, message: message || response.statusText },
+    }), { status: 502, headers: { 'content-type': 'application/json' } })
+  }
+  if (response.status === 204) return undefined as T
+  const responseBody = await response.text()
+  if (!responseBody.trim()) return undefined as T
+  try {
+    return JSON.parse(responseBody) as T
+  } catch {
+    throw new Response('Tailscale API returned invalid JSON', { status: 502 })
+  }
+}
+
+function roleFor(user: UserRow): 'user' | 'admin' {
+  return user.tailscale_role === 'admin' ? 'admin' : 'user'
+}
+
+function tailscaleTag(role: 'user' | 'admin') {
+  return role === 'admin' ? 'tag:team-admin' : 'tag:team-user'
+}
+
+async function hashSecret(value: string) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+function parseJsonBody(request: Request) {
+  return request.json().catch(() => { throw new Response('Invalid JSON body', { status: 400 }) }) as Promise<Record<string, unknown>>
+}
+
+async function syncDeviceTag(env: Env, nodeId: string, tag: string) {
+  return tailscaleRequest(env, `/device/${encodeURIComponent(nodeId)}/tags`, 'devices:core', [tag], {
+    method: 'POST',
+    body: JSON.stringify({ tags: [tag] }),
+  })
+}
+
+async function handleDesktopTailscale(request: Request, env: Env, user: UserRow) {
+  const role = roleFor(user)
+  const tag = tailscaleTag(role)
+  if (request.method === 'GET') {
+    const rows = await env.TEAM_DB.prepare(
+      'SELECT node_id, team_device_id, hostname, ipv4, ipv6, role, tag, online, last_seen, revoked_at FROM tailscale_devices WHERE access_subject = ?1 ORDER BY updated_at DESC',
+    ).bind(user.access_subject).all()
+    return json({ enabled: true, role, tag, devices: rows.results })
+  }
+  if (request.method === 'POST' && request.url.endsWith('/key')) {
+    const body = await parseJsonBody(request)
+    const requestedExpiry = typeof body.expirySeconds === 'number' ? body.expirySeconds : 86400
+    const expirySeconds = Math.min(Math.max(Math.floor(requestedExpiry), 300), 90 * 24 * 60 * 60)
+    const teamDeviceId = typeof body.deviceId === 'string' ? body.deviceId.slice(0, 64) : null
+    const hostname = typeof body.hostname === 'string' ? body.hostname.trim().slice(0, 255) : null
+    const config = tailscaleConfig(env)
+    const result = await tailscaleRequest<TailscaleKeyResponse>(env, `/tailnet/${encodeURIComponent(config.tailnetId)}/keys`, 'auth_keys', [tag], {
+      method: 'POST',
+      body: JSON.stringify({ capabilities: { devices: { create: { reusable: false, ephemeral: true, preauthorized: true, tags: [tag] } } }, expirySeconds }),
+    })
+    const issuedAt = Math.floor(Date.now() / 1000)
+    if (!result.id || !result.key || !result.created || !result.expires)
+      throw new Response('Tailscale auth key response is invalid', { status: 502 })
+    const expiresAt = Math.floor(Date.parse(result.expires) / 1000)
+    if (!Number.isFinite(expiresAt))
+      throw new Response('Tailscale auth key response has an invalid expiry', { status: 502 })
+    await env.TEAM_DB.prepare(
+      'INSERT INTO tailscale_key_issuances (id, access_subject, team_device_id, key_hash, role, tag, issued_at, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)',
+    ).bind(crypto.randomUUID(), user.access_subject, teamDeviceId, await hashSecret(result.key), role, tag, issuedAt, expiresAt).run()
+    await audit(env, user, 'tailscale_key_issued')
+    return json({ key: result.key, issuedAt, expiresAt, role, tag, deviceId: teamDeviceId, hostname })
+  }
+  if (request.method === 'POST' && request.url.endsWith('/reconcile')) {
+    const body = await parseJsonBody(request)
+    const nodeId = typeof body.nodeId === 'string' ? body.nodeId : ''
+    if (!/^[A-Za-z0-9:_-]{4,128}$/.test(nodeId)) return json({ error: 'nodeId is required' }, 400)
+    await syncDeviceTag(env, nodeId, tag)
+    const addresses = Array.isArray(body.addresses) ? body.addresses.filter((v): v is string => typeof v === 'string') : []
+    const hostname = typeof body.hostname === 'string' ? body.hostname.slice(0, 255) : null
+    const teamDeviceId = typeof body.deviceId === 'string' ? body.deviceId.slice(0, 64) : null
+    await env.TEAM_DB.prepare(
+      `INSERT INTO tailscale_devices (node_id, access_subject, team_device_id, hostname, ipv4, ipv6, role, tag, online, last_seen)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9)
+       ON CONFLICT(node_id) DO UPDATE SET access_subject=?2, team_device_id=?3, hostname=?4, ipv4=?5, ipv6=?6, role=?7, tag=?8, online=1, last_seen=?9, updated_at=CURRENT_TIMESTAMP, revoked_at=NULL`,
+    ).bind(nodeId, user.access_subject, teamDeviceId, hostname, addresses[0] ?? null, addresses[1] ?? null, role, tag, Math.floor(Date.now() / 1000)).run()
+    // Auth keys are one-time credentials. Once the client reconciles its
+    // device, retain only the non-recoverable issuance metadata and mark the
+    // newest matching issuance as used.
+    if (teamDeviceId) {
+      await env.TEAM_DB.prepare(
+        `UPDATE tailscale_key_issuances
+            SET used_at = COALESCE(used_at, ?1)
+          WHERE id = (
+            SELECT id FROM tailscale_key_issuances
+             WHERE access_subject = ?2 AND team_device_id = ?3
+             ORDER BY issued_at DESC LIMIT 1
+          )`,
+      ).bind(Math.floor(Date.now() / 1000), user.access_subject, teamDeviceId).run()
+    }
+    return json({ ok: true, nodeId, role, tag })
+  }
+  if (request.method === 'POST' && request.url.endsWith('/logout')) {
+    const body = await parseJsonBody(request)
+    const nodeId = typeof body.nodeId === 'string' ? body.nodeId : null
+    if (nodeId) await env.TEAM_DB.prepare('UPDATE tailscale_devices SET online=0, last_seen=?1, updated_at=CURRENT_TIMESTAMP WHERE node_id=?2 AND access_subject=?3').bind(Math.floor(Date.now() / 1000), nodeId, user.access_subject).run()
+    return json({ ok: true })
+  }
+  return json({ error: 'Not found' }, 404)
+}
+
+async function requireAdmin(identity: JWTPayload, env: Env) {
+  if (!env.ADMIN_EMAIL?.trim())
+    throw new Response('ADMIN_EMAIL is not configured', { status: 503 })
+  const email = typeof identity.email === 'string' ? identity.email.trim() : ''
+  if (email.toLowerCase() !== env.ADMIN_EMAIL.trim().toLowerCase())
+    throw new Response('Administrator access required', { status: 403 })
+}
+
+async function handleAdminUsers(request: Request, env: Env, identity: JWTPayload, currentUser: UserRow) {
+  await requireAdmin(identity, env)
+  const url = new URL(request.url)
+  if (request.method === 'GET') {
+    const search = url.searchParams.get('search')?.trim() ?? ''
+    const selectUsers = `SELECT access_subject, email, display_name, enabled,
+                                COALESCE(tailscale_role, 'user') AS tailscale_role
+                           FROM users`
+    const rows = search
+      ? await env.TEAM_DB.prepare(`${selectUsers}
+                         WHERE lower(COALESCE(email, '')) LIKE ?1
+                            OR lower(COALESCE(display_name, '')) LIKE ?1
+                         ORDER BY lower(COALESCE(display_name, '')), lower(COALESCE(email, ''))`).bind(`%${search.toLowerCase()}%`).all<UserRow>()
+      : await env.TEAM_DB.prepare(`${selectUsers}
+                         ORDER BY lower(COALESCE(display_name, '')), lower(COALESCE(email, ''))`).all<UserRow>()
+    const users = await Promise.all(rows.results.map(async (row) => {
+      const devices = await env.TEAM_DB.prepare('SELECT node_id AS nodeId, hostname, role, tag, online, last_seen AS lastSeen, revoked_at AS revokedAt FROM tailscale_devices WHERE access_subject=?1 ORDER BY updated_at DESC').bind(row.access_subject).all()
+      const latestKey = await env.TEAM_DB.prepare(
+        `SELECT issued_at AS issuedAt, expires_at AS expiresAt, role, tag,
+                revoked_at AS revokedAt, used_at AS usedAt
+           FROM tailscale_key_issuances
+          WHERE access_subject = ?1
+          ORDER BY issued_at DESC
+          LIMIT 1`,
+      ).bind(row.access_subject).first<{
+        issuedAt: number
+        expiresAt: number
+        role: 'user' | 'admin'
+        tag: string
+        revokedAt: number | null
+        usedAt: number | null
+      }>()
+      return {
+        accessSubject: row.access_subject,
+        email: row.email,
+        displayName: row.display_name,
+        enabled: row.enabled === 1,
+        tailscaleRole: row.tailscale_role,
+        devices: devices.results,
+        latestKey: latestKey
+          ? {
+              issuedAt: latestKey.issuedAt,
+              expiresAt: latestKey.expiresAt,
+              role: latestKey.role,
+              tag: latestKey.tag,
+              revoked: latestKey.revokedAt !== null,
+              used: latestKey.usedAt !== null,
+            }
+          : null,
+      }
+    }))
+    return json({ users })
+  }
+  const match = url.pathname.match(/^\/v1\/admin\/users\/([^/]+)\/role$/)
+  if (request.method === 'PATCH' && match) {
+    const subject = decodeURIComponent(match[1])
+    const body = await parseJsonBody(request)
+    const role = body.role === 'admin' ? 'admin' : body.role === 'user' ? 'user' : null
+    if (!role) return json({ error: 'role must be user or admin' }, 400)
+    const row = await env.TEAM_DB.prepare('SELECT access_subject, email, display_name, team_name, enabled, quota_upload, quota_download, quota_total, quota_expire, COALESCE(tailscale_role,\'user\') AS tailscale_role FROM users WHERE access_subject=?1').bind(subject).first<UserRow>()
+    if (!row) return json({ error: 'User not found' }, 404)
+    await env.TEAM_DB.prepare('UPDATE users SET tailscale_role=?1, updated_at=CURRENT_TIMESTAMP WHERE access_subject=?2').bind(role, subject).run()
+    const tag = tailscaleTag(role)
+    const devices = await env.TEAM_DB.prepare('SELECT node_id FROM tailscale_devices WHERE access_subject=?1 AND revoked_at IS NULL').bind(subject).all<{ node_id: string }>()
+    const syncErrors: string[] = []
+    for (const device of devices.results) {
+      try { await syncDeviceTag(env, device.node_id, tag) } catch (error) { syncErrors.push(error instanceof Response ? `device ${device.node_id}: Tailscale API error` : `device ${device.node_id}: sync failed`) }
+    }
+    await audit(env, currentUser, `tailscale_role_changed:${role}`)
+    return json({ ok: true, accessSubject: subject, role, tag, synced: devices.results.length - syncErrors.length, errors: syncErrors })
+  }
+  const revokeMatch = url.pathname.match(/^\/v1\/admin\/devices\/([^/]+)$/)
+  if (request.method === 'DELETE' && revokeMatch) {
+    const nodeId = decodeURIComponent(revokeMatch[1])
+    const device = await env.TEAM_DB.prepare('SELECT node_id, access_subject, team_device_id, role FROM tailscale_devices WHERE node_id=?1').bind(nodeId).first<{ node_id: string; access_subject: string; team_device_id: string | null; role: 'user' | 'admin' }>()
+    if (!device) return json({ error: 'Device not found' }, 404)
+    await tailscaleRequest(env, `/device/${encodeURIComponent(nodeId)}`, 'devices:core', [tailscaleTag(device.role === 'admin' ? 'admin' : 'user')], { method: 'DELETE' })
+    await env.TEAM_DB.prepare('UPDATE tailscale_devices SET revoked_at=?1, online=0, updated_at=CURRENT_TIMESTAMP WHERE node_id=?2').bind(Math.floor(Date.now() / 1000), nodeId).run()
+    if (device.team_device_id) {
+      await env.TEAM_DB.prepare(
+        `UPDATE tailscale_key_issuances
+            SET revoked_at = COALESCE(revoked_at, ?1)
+          WHERE access_subject = ?2 AND team_device_id = ?3
+            AND used_at IS NOT NULL`,
+      ).bind(Math.floor(Date.now() / 1000), device.access_subject, device.team_device_id).run()
+    }
+    await audit(env, currentUser, 'tailscale_device_revoked')
+    return json({ ok: true, nodeId })
+  }
+  return json({ error: 'Not found' }, 404)
+}
+
 // Upsert a presence row for the calling install. The device id is a random
 // per-install string generated by the desktop; it carries no identity beyond
 // "this installation was seen recently".
@@ -408,9 +777,11 @@ async function handleRequest(
       503,
     )
 
-  if (request.method === 'PUT' && url.pathname === '/v1/admin/resource') {
+  // Machine-to-machine resource pushes use only ADMIN_API_TOKEN. Keep this
+  // branch ahead of Access authentication so the token is never parsed as a
+  // Cloudflare Access JWT and does not require an Access identity or D1 user.
+  if (request.method === 'PUT' && url.pathname === '/v1/admin/resource')
     return handleAdminResourcePut(request, env)
-  }
 
   const identity = await authenticate(request, env)
   try {
@@ -430,6 +801,17 @@ async function handleRequest(
     return json({ error: 'User lookup or provisioning failed' }, 561)
   }
   requireEnabledUser(user)
+
+  if (url.pathname === '/admin') {
+    await requireAdmin(identity, env)
+    return new Response(ADMIN_HTML, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'private, no-store' } })
+  }
+
+  if (url.pathname.startsWith('/v1/admin/users') || url.pathname.startsWith('/v1/admin/devices/'))
+    return handleAdminUsers(request, env, identity, user)
+
+  if (url.pathname.startsWith('/v1/desktop/tailscale'))
+    return handleDesktopTailscale(request, env, user)
 
   const deviceId = request.headers.get('x-team-device')
   if (deviceId && /^[A-Za-z0-9_-]{8,64}$/.test(deviceId)) {

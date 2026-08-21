@@ -45,16 +45,20 @@ Clash 配置发给桌面端。真实订阅 URL 只存在于 Worker Secret，客�
    `clash-verge-team` 与 KV 命名空间 `clash-verge-rev-resource-cache`，
    把返回的 id 临时写进本次构建使用的 wrangler.toml，并应用全部 D1 migrations。
    重复部署幂等，已存在的资源直接复用。
-5. 在 Worker → **Settings → Variables and Secrets** 添加三个变量：
+5. 在 Worker → **Settings → Variables and Secrets** 添加以下配置。四个 Secret 的名称和用途保持固定；真实值不要写入 `wrangler.toml`、仓库或客户端资源：
 
    | 变量 | 类型 | 内容 |
    | --- | --- | --- |
    | `TEAM_DOMAIN` | Text | Access 团队域名，如 `https://your-team.cloudflareaccess.com` |
    | `ACCESS_AUD` | Text | Access 应用的 Application Audience (AUD) tag |
-   | `UPSTREAM_SUBSCRIPTION_URL` | Secret | 真实订阅 URL |
+   | `UPSTREAM_SUBSCRIPTION_URL` | Secret 1/4 | 真实订阅 URL；推送模式验证通过后可删除 |
    | `DEFAULT_TEAM_NAME` | Text（可选） | 团队显示名；不填用代码默认值 |
    | `CACHE_TTL_SECONDS` | Text（可选） | KV 缓存秒数；不填默认 300 |
-   | `ADMIN_API_TOKEN` | Secret（可选） | 推送模式管理令牌；上游 WAF 拦截机房出口时启用，见部署文档 4c |
+   | `ADMIN_API_TOKEN` | Secret 2/4（推送模式可选） | 住宅 runner 推送配置用的长随机令牌；不授予 `/admin` 或用户管理权限 |
+   | `ADMIN_EMAIL` | Text（唯一管理员入口） | 唯一允许访问 `/admin` 和 `/v1/admin/*` 的 Access 身份邮箱；未设置时管理员接口停用 |
+   | `TAILSCALE_TAILNET` | Text | Tailscale Tailnet ID；不要填写 `https://`，也不要改写或拼接域名 |
+   | `TAILSCALE_OAUTH_CLIENT_ID` | Secret 3/4 | Tailscale OAuth client ID；需授权 `auth_keys`、`devices:core` 及 `tag:team-user`、`tag:team-admin` |
+   | `TAILSCALE_OAUTH_CLIENT_SECRET` | Secret 4/4 | Tailscale OAuth client secret |
 
    保存后立即生效；`keep_vars` 保证之后每次 push 重新部署时都保留这里的
    最新值。未配置时 Worker 会返回 503 提示。
@@ -72,6 +76,20 @@ Clash 配置发给桌面端。真实订阅 URL 只存在于 Worker Secret，客�
   GitHub Action 兜底路径。
 - `DEFAULT_TEAM_NAME`、`CACHE_TTL_SECONDS` 由 dashboard 管理（可选，代码内置
   默认值）。wrangler.toml 不含 `[vars]`，部署不会覆盖 dashboard 里的任何变量。
+- `TAILSCALE_TAILNET` 填 Tailscale 管理后台显示的 Tailnet ID。Tailnet ID 是 Tailscale
+  API v2 推荐使用的标识，Worker 会原样作为 `/tailnet/:tailnet` 的路径参数使用，仅做
+  URL 路径编码；不要填写 `https://` 或其他 URL 前缀，也不要填写带后缀的完整 API URL。
+  旧版配置中使用的 Tailnet DNS 名称/组织域名仍可作为 API 的兼容标识，但新配置应优先使用
+  Tailnet ID。
+- Tailscale OAuth token 请求会按操作场景发送 `auth_keys` 或 `devices:core`，并带上
+  `tag:team-user` 或 `tag:team-admin`；两个 tag 都必须在 OAuth client 的授权范围内。
+- `/admin` 与 `/v1/admin/*` 只接受 Access JWT 中与 `ADMIN_EMAIL` 完全匹配（不区分大小写）
+  的邮箱；D1 的 `tailscale_role` 只用于 Tailscale tag，不构成管理后台权限。
+- Tailscale 前置操作：在 Tailscale Admin Console 的 OAuth clients 中创建 client，开启
+  `auth_keys` 与 `devices:core` scope，并允许 `tag:team-user`、`tag:team-admin`；在
+  **Access → Applications** 中保护 Worker 的自定义域名，确认 `ADMIN_EMAIL` 对应的邮箱
+  能通过 Access。桌面端只接收一次性、非复用、ephemeral、preauthorized key，key 原文
+  不写入 D1 或日志。
 - 兜底：`docs/team-deployment.zh-CN.md` 里的 **Deploy Team Worker** Action 使用
   `team-production` Environment 中的 `CLOUDFLARE_API_TOKEN` 等资源 id 变量，
   走 `deploy:ci` 路径，与 Workers Builds 互不冲突（同一个 Worker 名字）。
@@ -105,4 +123,16 @@ login`，并把 `.env.example` 复制为 `.env` 填好（`.env` 已被 git 忽�
 | `GET /healthz` | 无 | 存活探测 |
 | `GET /v1/desktop/account` | Access JWT（首登自动建档） | 账户与额度信息 |
 | `GET /v1/desktop/profile` | Access JWT（首登自动建档） | 受管 Clash YAML（ETag/304） |
-| `PUT /v1/admin/resource` | ADMIN_API_TOKEN（Bearer） | 推送受管配置内容（推送模式） |
+| `PUT /v1/admin/resource` | `ADMIN_API_TOKEN`（Bearer；仅资源推送，不授予管理员权限） | 推送受管配置内容（推送模式） |
+| `GET /admin` | Access JWT（仅 `ADMIN_EMAIL`） | Tailscale 管理页面 |
+| `/v1/admin/users/*`、`/v1/admin/devices/*` | Access JWT（仅 `ADMIN_EMAIL`） | 用户角色与设备管理 |
+| `/v1/desktop/tailscale/*` | Access JWT | 桌面端 Tailscale key、设备登记与退出 |
+
+桌面端请求 `POST /v1/desktop/tailscale/key` 时可携带 `deviceId` 和 `hostname`；Worker
+会在响应中保留这两个字段，兼容桌面端的设备关联流程。Tailscale auth key 只在该响应中
+返回一次，随后无法从 Worker、D1 或管理页面恢复。数据库只保存 SHA-256 摘要以及
+`issuedAt`、`expiresAt`、`role`、`tag` 等非敏感元数据；设备完成登记后会标记 `usedAt`，
+管理员撤销设备后会标记 `revokedAt`。`GET /v1/admin/users` 与 `/admin` 管理表只展示
+最新密钥的 `issuedAt`、`expiresAt`、`role`、`tag`（以及可用时的 `used`/`revoked` 状态）；
+SHA-256 摘要仅保存在数据库中，管理员 API 和页面都不会返回或展示它。绝不会返回或持久化
+auth key 原文。需要再次使用时必须重新生成一次性 key。

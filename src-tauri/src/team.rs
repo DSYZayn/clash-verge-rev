@@ -17,18 +17,25 @@ use serde_yaml_ng::Mapping;
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::HashMap,
+    fs::OpenOptions,
+    io::Write,
     path::PathBuf,
+    process::Stdio,
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::TcpListener,
+    process::Command,
 };
 
 pub const MANAGED_PROFILE_UID: &str = "RTEAMMANAGED";
 const SESSION_FILE: &str = "team-session.enc";
 const DEVICE_ID_FILE: &str = "team-device-id";
+const TAILSCALE_KEY_PATH: &str = "/v1/desktop/tailscale/key";
+const TAILSCALE_RECONCILE_PATH: &str = "/v1/desktop/tailscale/reconcile";
+const TAILSCALE_LOGOUT_PATH: &str = "/v1/desktop/tailscale/logout";
 static BACKGROUND_STARTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Deserialize)]
@@ -85,6 +92,8 @@ struct TeamSession {
     etag: Option<String>,
     account: Option<TeamAccount>,
     last_sync_at: Option<u64>,
+    #[serde(default)]
+    tailscale: Option<TailscaleInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -118,6 +127,76 @@ pub struct TeamStatus {
     pub last_sync_at: Option<u64>,
     pub managed_profile_installed: bool,
     pub managed_profile_active: bool,
+    pub tailscale: TailscaleStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TailscaleInfo {
+    pub node_id: Option<String>,
+    pub key_issued_at: Option<u64>,
+    pub key_expires_at: Option<u64>,
+    pub role: Option<String>,
+    pub tag: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TailscaleStatus {
+    pub installed: bool,
+    pub version: Option<String>,
+    pub logged_in: bool,
+    pub device_name: Option<String>,
+    pub ipv4: Option<String>,
+    pub online: bool,
+    pub node_id: Option<String>,
+    pub addresses: Vec<String>,
+    pub key_issued_at: Option<u64>,
+    pub key_expires_at: Option<u64>,
+    pub role: Option<String>,
+    pub tag: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TailscaleKeyResponse {
+    #[serde(alias = "auth_key", alias = "authKey")]
+    key: String,
+    #[serde(default, alias = "issued_at", alias = "issuedAt")]
+    issued_at: Option<u64>,
+    #[serde(default, alias = "expires_at", alias = "expiresAt")]
+    expires_at: Option<u64>,
+    role: Option<String>,
+    tag: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TailscaleReconcileResponse {
+    role: Option<String>,
+    tag: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TailscaleStatusJson {
+    #[serde(rename = "BackendState")]
+    backend_state: Option<String>,
+    #[serde(rename = "Self")]
+    self_node: Option<TailscaleNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TailscaleNode {
+    #[serde(rename = "ID", alias = "NodeID")]
+    id: Option<String>,
+    #[serde(rename = "HostName")]
+    hostname: Option<String>,
+    #[serde(rename = "DNSName")]
+    dns_name: Option<String>,
+    #[serde(rename = "TailscaleIPs", default)]
+    ips: Vec<String>,
+    #[serde(rename = "Online")]
+    online: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -213,6 +292,168 @@ fn save_session(session: &TeamSession) -> Result<()> {
         encrypt_data(&serde_json::to_string(session)?).map_err(|error| anyhow::anyhow!(error.to_string()))?;
     std::fs::write(path, encrypted)?;
     Ok(())
+}
+
+fn tailscale_program() -> &'static str {
+    if cfg!(windows) { "tailscale.exe" } else { "tailscale" }
+}
+
+async fn tailscale_output(args: &[&str]) -> Result<std::process::Output> {
+    Command::new(tailscale_program())
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .with_context(|| format!("{} is not installed or is unavailable", tailscale_program()))
+}
+
+async fn tailscale_status_snapshot() -> TailscaleStatus {
+    let Ok(version) = tailscale_output(&["version"]).await else {
+        return TailscaleStatus::default();
+    };
+    if !version.status.success() {
+        return TailscaleStatus::default();
+    }
+    let version = String::from_utf8_lossy(&version.stdout)
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let mut result = TailscaleStatus {
+        installed: true,
+        version,
+        ..TailscaleStatus::default()
+    };
+
+    if let Ok(status) = tailscale_output(&["status", "--json"]).await
+        && status.status.success()
+        && let Ok(value) = serde_json::from_slice::<TailscaleStatusJson>(&status.stdout)
+    {
+        result.logged_in = value.backend_state.as_deref() == Some("Running") && value.self_node.is_some();
+        if let Some(node) = value.self_node {
+            result.node_id = node.id;
+            result.device_name = node.hostname.or(node.dns_name);
+            result.addresses = node.ips;
+            result.ipv4 = result
+                .addresses
+                .iter()
+                .find(|ip| ip.parse::<std::net::Ipv4Addr>().is_ok())
+                .cloned();
+            result.online = node.online.unwrap_or(result.logged_in);
+        }
+    }
+    if let Ok(ip) = tailscale_output(&["ip", "-4"]).await
+        && ip.status.success()
+        && result.ipv4.is_none()
+    {
+        result.ipv4 = String::from_utf8_lossy(&ip.stdout)
+            .lines()
+            .next()
+            .map(str::trim)
+            .filter(|value| value.parse::<std::net::Ipv4Addr>().is_ok())
+            .map(str::to_owned);
+        if let Some(ipv4) = result.ipv4.as_ref()
+            && !result.addresses.iter().any(|address| address == ipv4)
+        {
+            result.addresses.insert(0, ipv4.clone());
+        }
+    }
+    result
+}
+
+fn create_tailscale_key_file(key: &str) -> Result<PathBuf> {
+    let path = std::env::temp_dir().join(format!("clash-verge-tailscale-key-{}", random_urlsafe(18)?));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path)?;
+    if let Err(error) = file.write_all(key.as_bytes()).and_then(|()| file.sync_all()) {
+        let _ = std::fs::remove_file(&path);
+        return Err(error.into());
+    }
+    Ok(path)
+}
+
+async fn tailscale_up(key: &str) -> Result<()> {
+    let path = create_tailscale_key_file(key)?;
+    let path_arg = format!("--auth-key=file:{}", path.to_string_lossy());
+    let result = Command::new(tailscale_program())
+        .arg("up")
+        .arg(path_arg)
+        .args(if cfg!(windows) { &["--unattended"][..] } else { &[][..] })
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to start tailscale up: {error}"));
+    let _ = std::fs::remove_file(path);
+    let result = result?;
+    if !result.success() {
+        bail!("tailscale up failed (exit status {})", result);
+    }
+    Ok(())
+}
+
+async fn team_post(path: &str, body: serde_json::Value) -> Result<reqwest::Response> {
+    let config = load_config()?;
+    let session = usable_session().await?;
+    reqwest::Client::new()
+        .post(endpoint(&config.api_base_url, path)?)
+        .bearer_auth(&session.access_token)
+        .header("x-team-device", device_id()?)
+        .json(&body)
+        .send()
+        .await
+        .context("team Worker request failed")
+}
+
+async fn tailscale_reconcile(
+    device_id: &str,
+    snapshot: &TailscaleStatus,
+) -> Result<TailscaleReconcileResponse> {
+    let node_id = snapshot
+        .node_id
+        .as_deref()
+        .context("Tailscale status did not include Self.ID")?;
+    let hostname = snapshot
+        .device_name
+        .as_deref()
+        .context("Tailscale status did not include a hostname")?;
+    team_post(
+        TAILSCALE_RECONCILE_PATH,
+        serde_json::json!({
+            "deviceId": device_id,
+            "nodeId": node_id,
+            "hostname": hostname,
+            "addresses": &snapshot.addresses,
+        }),
+    )
+    .await?
+    .error_for_status()?
+    .json::<TailscaleReconcileResponse>()
+    .await
+    .context("invalid Tailscale reconcile response")
+}
+
+async fn save_tailscale_reconcile(
+    response: TailscaleReconcileResponse,
+    node_id: Option<String>,
+) -> Result<()> {
+    let mut session = usable_session().await?;
+    session.tailscale = Some(TailscaleInfo {
+        node_id,
+        key_issued_at: session.tailscale.as_ref().and_then(|info| info.key_issued_at),
+        key_expires_at: session.tailscale.as_ref().and_then(|info| info.key_expires_at),
+        role: response.role,
+        tag: response.tag,
+    });
+    save_session(&session)
 }
 
 fn endpoint(base: &str, path: &str) -> Result<reqwest::Url> {
@@ -418,6 +659,16 @@ pub async fn status() -> Result<TeamStatus> {
     let latest = profiles.latest_arc();
     let managed_profile_installed = latest.get_item(MANAGED_PROFILE_UID).is_ok();
     let managed_profile_active = latest.is_current_profile_index(&MANAGED_PROFILE_UID.into());
+    let mut tailscale = tailscale_status_snapshot().await;
+    if let Some(info) = session.as_ref().and_then(|value| value.tailscale.as_ref()) {
+        if tailscale.node_id.is_none() {
+            tailscale.node_id = info.node_id.clone();
+        }
+        tailscale.key_issued_at = info.key_issued_at;
+        tailscale.key_expires_at = info.key_expires_at;
+        tailscale.role = info.role.clone();
+        tailscale.tag = info.tag.clone();
+    }
     Ok(TeamStatus {
         configured,
         authenticated: session.as_ref().is_some_and(|value| !value.access_token.is_empty()),
@@ -425,7 +676,105 @@ pub async fn status() -> Result<TeamStatus> {
         last_sync_at: session.as_ref().and_then(|value| value.last_sync_at),
         managed_profile_installed,
         managed_profile_active,
+        tailscale,
     })
+}
+
+pub async fn tailscale_connect() -> Result<TeamStatus> {
+    let device_id = device_id()?;
+    let before = tailscale_status_snapshot().await;
+    if before.logged_in && before.node_id.is_some() {
+        let node_id = before.node_id.clone();
+        let response = tailscale_reconcile(&device_id, &before).await?;
+        save_tailscale_reconcile(response, node_id).await?;
+        return status().await;
+    }
+    let hostname = before
+        .device_name
+        .clone()
+        .or_else(|| gethostname::gethostname().into_string().ok())
+        .filter(|value| !value.trim().is_empty());
+    let hostname = hostname.context("unable to determine the Tailscale hostname")?;
+    let response = team_post(
+        TAILSCALE_KEY_PATH,
+        serde_json::json!({
+            "deviceId": device_id,
+            "hostname": &hostname,
+            "reusable": false,
+            "ephemeral": true,
+        }),
+    )
+    .await?
+    .error_for_status()?;
+    let issued = response.json::<TailscaleKeyResponse>().await?;
+    if issued.key.trim().is_empty() {
+        bail!("Worker returned an empty Tailscale authorization key")
+    }
+    tailscale_up(&issued.key).await?;
+    let after = tailscale_status_snapshot().await;
+    let node_id = after
+        .node_id
+        .clone()
+        .context("Tailscale status did not include Self.ID")?;
+    let hostname = after
+        .device_name
+        .clone()
+        .or(hostname)
+        .context("Tailscale status did not include a hostname")?;
+    let reconcile = tailscale_reconcile(&device_id, &after).await?;
+    let mut session = usable_session().await?;
+    session.tailscale = Some(TailscaleInfo {
+        node_id: Some(node_id),
+        key_issued_at: issued.issued_at,
+        key_expires_at: issued.expires_at,
+        role: reconcile.role.or(issued.role),
+        tag: reconcile.tag.or(issued.tag),
+    });
+    save_session(&session)?;
+    status().await
+}
+
+pub async fn tailscale_refresh() -> Result<TeamStatus> {
+    let device_id = device_id()?;
+    let snapshot = tailscale_status_snapshot().await;
+    if !snapshot.logged_in || snapshot.node_id.is_none() {
+        return tailscale_connect().await;
+    }
+    let node_id = snapshot.node_id.clone();
+    let response = tailscale_reconcile(&device_id, &snapshot).await?;
+    save_tailscale_reconcile(response, node_id).await?;
+    status().await
+}
+
+pub async fn tailscale_logout() -> Result<TeamStatus> {
+    let snapshot = tailscale_status_snapshot().await;
+    let session = load_session()?;
+    let node_id = snapshot.node_id.or_else(|| {
+        session
+            .as_ref()
+            .and_then(|value| value.tailscale.as_ref())
+            .and_then(|value| value.node_id.clone())
+    });
+    let cli_result = tailscale_output(&["logout"]).await;
+    let worker_result = team_post(TAILSCALE_LOGOUT_PATH, serde_json::json!({ "nodeId": node_id }))
+        .await?
+        .error_for_status();
+    if let Err(error) = cli_result {
+        // Still notify the Worker so its device record is revoked when the
+        // local CLI is unavailable or already logged out.
+        worker_result?;
+        return Err(error);
+    }
+    let cli_output = cli_result?;
+    if !cli_output.status.success() {
+        bail!("tailscale logout failed (exit status {})", cli_output.status);
+    }
+    worker_result?;
+    if let Some(mut session) = load_session()? {
+        session.tailscale = None;
+        save_session(&session)?;
+    }
+    status().await
 }
 
 pub async fn logout() -> Result<()> {
@@ -438,9 +787,7 @@ pub async fn logout() -> Result<()> {
         .get_item(MANAGED_PROFILE_UID)
         .is_ok();
     if managed_installed {
-        if let Err(error) =
-            crate::cmd::profile::delete_profile_inner(&MANAGED_PROFILE_UID.into()).await
-        {
+        if let Err(error) = crate::cmd::profile::delete_profile_inner(&MANAGED_PROFILE_UID.into()).await {
             logging!(error, Type::Cmd, "managed profile cleanup on logout failed: {error}");
         }
         // Deleting a non-current profile emits no frontend event; push the

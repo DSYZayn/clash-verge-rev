@@ -54,7 +54,7 @@ interface IConfigData {
     'fake-ip-range'?: string
     'fake-ip-range6'?: string
     'fake-ip-filter'?: string[]
-    'fake-ip-filter-mode'?: 'blacklist' | 'whitelist'
+    'fake-ip-filter-mode'?: 'blacklist' | 'whitelist' | 'rule'
     'prefer-h3'?: boolean
     'respect-rules'?: boolean
     nameserver?: string[]
@@ -283,6 +283,22 @@ interface ITeamStatus {
   lastSyncAt?: number
   managedProfileInstalled: boolean
   managedProfileActive?: boolean
+  tailscale: ITailscaleStatus
+}
+
+interface ITailscaleStatus {
+  installed: boolean
+  version?: string
+  loggedIn: boolean
+  deviceName?: string
+  ipv4?: string
+  online: boolean
+  nodeId?: string
+  addresses: string[]
+  keyIssuedAt?: number
+  keyExpiresAt?: number
+  role?: string
+  tag?: string
 }
 
 interface IVergeTestItem {

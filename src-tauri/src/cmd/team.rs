@@ -25,3 +25,18 @@ pub async fn sync_team_profile() -> CmdResult<TeamStatus> {
 pub async fn logout_team() -> CmdResult {
     team::logout().await.stringify_err()
 }
+
+#[tauri::command]
+pub async fn connect_tailscale() -> CmdResult<team::TeamStatus> {
+    team::tailscale_connect().await.stringify_err()
+}
+
+#[tauri::command]
+pub async fn refresh_tailscale() -> CmdResult<team::TeamStatus> {
+    team::tailscale_refresh().await.stringify_err()
+}
+
+#[tauri::command]
+pub async fn logout_tailscale() -> CmdResult<team::TeamStatus> {
+    team::tailscale_logout().await.stringify_err()
+}

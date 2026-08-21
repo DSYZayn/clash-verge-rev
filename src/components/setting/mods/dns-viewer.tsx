@@ -48,6 +48,7 @@ const Item = styled(ListItem)(() => ({
 }))
 
 type NameserverPolicy = Record<string, any>
+type FakeIpFilterMode = 'blacklist' | 'whitelist' | 'rule'
 
 function parseNameserverPolicy(str: string): NameserverPolicy {
   const result: NameserverPolicy = {}
@@ -132,13 +133,59 @@ function parseList(str: string): string[] {
     .filter(Boolean)
 }
 
+function parseFakeIpFilter(str: string, mode: FakeIpFilterMode): string[] {
+  if (mode === 'rule') {
+    return str
+      .split(/\r?\n/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+  }
+  return parseList(str)
+}
+
+function formatFakeIpFilter(filters: string[], mode: FakeIpFilterMode): string {
+  return mode === 'rule' ? filters.join('\n') : filters.join(', ')
+}
+
+const DEFAULT_TAILSCALE_FAKE_IP_FILTER = ['+.ts.net', 'ts.net']
+
+const DEFAULT_TAILSCALE_NAMESERVER_POLICY = {
+  '+.ts.net': '100.100.100.100',
+  'ts.net': '100.100.100.100',
+}
+
+function mergeTailscaleFakeIpFilter(
+  filters: string[],
+  mode: FakeIpFilterMode,
+): string[] {
+  const defaults =
+    mode === 'blacklist'
+      ? DEFAULT_TAILSCALE_FAKE_IP_FILTER
+      : []
+
+  return [...filters, ...defaults.filter((filter) => !filters.includes(filter))]
+}
+
+function mergeTailscaleNameserverPolicy(policy: unknown): NameserverPolicy {
+  if (!policy || typeof policy !== 'object' || Array.isArray(policy)) return {}
+
+  return {
+    ...(policy as NameserverPolicy),
+    ...Object.fromEntries(
+      Object.entries(DEFAULT_TAILSCALE_NAMESERVER_POLICY).filter(
+        ([domain]) => !(domain in (policy as NameserverPolicy)),
+      ),
+    ),
+  }
+}
+
 const DEFAULT_DNS_CONFIG = {
   enable: true,
   listen: ':53',
   'enhanced-mode': 'fake-ip' as 'fake-ip' | 'redir-host',
   'fake-ip-range': '198.18.0.1/16',
   'fake-ip-range6': 'fdfe:dcba:9876::1/64',
-  'fake-ip-filter-mode': 'blacklist' as 'blacklist' | 'whitelist',
+  'fake-ip-filter-mode': 'blacklist' as FakeIpFilterMode,
   'prefer-h3': false,
   'respect-rules': false,
   'use-hosts': false,
@@ -155,6 +202,7 @@ const DEFAULT_DNS_CONFIG = {
     'localhost.ptlogin2.qq.com',
     '*.msftncsi.com',
     'www.msftconnecttest.com',
+    ...DEFAULT_TAILSCALE_FAKE_IP_FILTER,
   ],
   'default-nameserver': [
     'system',
@@ -169,7 +217,7 @@ const DEFAULT_DNS_CONFIG = {
     'https://dns.alidns.com/dns-query',
   ],
   fallback: [],
-  'nameserver-policy': {},
+  'nameserver-policy': DEFAULT_TAILSCALE_NAMESERVER_POLICY,
   'proxy-server-nameserver': [
     'https://doh.pub/dns-query',
     'https://dns.alidns.com/dns-query',
@@ -200,7 +248,7 @@ export function DnsViewer({ ref }: { ref?: Ref<DialogRef> }) {
     enhancedMode: 'fake-ip' | 'redir-host'
     fakeIpRange: string
     fakeIpRange6: string
-    fakeIpFilterMode: 'blacklist' | 'whitelist'
+    fakeIpFilterMode: FakeIpFilterMode
     preferH3: boolean
     respectRules: boolean
     useHosts: boolean
@@ -231,7 +279,10 @@ export function DnsViewer({ ref }: { ref?: Ref<DialogRef> }) {
     useHosts: DEFAULT_DNS_CONFIG['use-hosts'],
     useSystemHosts: DEFAULT_DNS_CONFIG['use-system-hosts'],
     ipv6: DEFAULT_DNS_CONFIG.ipv6,
-    fakeIpFilter: DEFAULT_DNS_CONFIG['fake-ip-filter'].join(', '),
+    fakeIpFilter: formatFakeIpFilter(
+      DEFAULT_DNS_CONFIG['fake-ip-filter'],
+      DEFAULT_DNS_CONFIG['fake-ip-filter-mode'],
+    ),
     defaultNameserver: DEFAULT_DNS_CONFIG['default-nameserver'].join(', '),
     nameserver: DEFAULT_DNS_CONFIG.nameserver.join(', '),
     fallback: DEFAULT_DNS_CONFIG.fallback.join(', '),
@@ -246,7 +297,9 @@ export function DnsViewer({ ref }: { ref?: Ref<DialogRef> }) {
       DEFAULT_DNS_CONFIG['fallback-filter'].ipcidr?.join(', ') || '',
     fallbackDomain:
       DEFAULT_DNS_CONFIG['fallback-filter'].domain?.join(', ') || '',
-    nameserverPolicy: '',
+    nameserverPolicy: formatNameserverPolicy(
+      DEFAULT_TAILSCALE_NAMESERVER_POLICY,
+    ),
     hosts: '',
   })
 
@@ -273,9 +326,19 @@ export function DnsViewer({ ref }: { ref?: Ref<DialogRef> }) {
       dnsConfig['fake-ip-filter-mode'] ||
       DEFAULT_DNS_CONFIG['fake-ip-filter-mode']
     const validFakeIpFilterMode =
-      fakeIpFilterMode === 'blacklist' || fakeIpFilterMode === 'whitelist'
+      fakeIpFilterMode === 'blacklist' ||
+      fakeIpFilterMode === 'whitelist' ||
+      fakeIpFilterMode === 'rule'
         ? fakeIpFilterMode
         : DEFAULT_DNS_CONFIG['fake-ip-filter-mode']
+
+    const configuredFakeIpFilter = Array.isArray(dnsConfig['fake-ip-filter'])
+      ? dnsConfig['fake-ip-filter'].filter(
+          (filter: unknown): filter is string => typeof filter === 'string',
+        )
+      : validFakeIpFilterMode === 'rule'
+        ? []
+        : DEFAULT_DNS_CONFIG['fake-ip-filter']
 
     setValues({
       enable: dnsConfig.enable ?? DEFAULT_DNS_CONFIG.enable,
@@ -293,9 +356,13 @@ export function DnsViewer({ ref }: { ref?: Ref<DialogRef> }) {
       useSystemHosts:
         dnsConfig['use-system-hosts'] ?? DEFAULT_DNS_CONFIG['use-system-hosts'],
       ipv6: dnsConfig.ipv6 ?? DEFAULT_DNS_CONFIG.ipv6,
-      fakeIpFilter:
-        dnsConfig['fake-ip-filter']?.join(', ') ??
-        DEFAULT_DNS_CONFIG['fake-ip-filter'].join(', '),
+      fakeIpFilter: formatFakeIpFilter(
+        mergeTailscaleFakeIpFilter(
+          configuredFakeIpFilter,
+          validFakeIpFilterMode,
+        ),
+        validFakeIpFilterMode,
+      ),
       nameserver:
         dnsConfig.nameserver?.join(', ') ??
         DEFAULT_DNS_CONFIG.nameserver.join(', '),
@@ -327,7 +394,9 @@ export function DnsViewer({ ref }: { ref?: Ref<DialogRef> }) {
         dnsConfig['fallback-filter']?.domain?.join(', ') ??
         DEFAULT_DNS_CONFIG['fallback-filter'].domain.join(', '),
       nameserverPolicy:
-        formatNameserverPolicy(dnsConfig['nameserver-policy']) || '',
+        formatNameserverPolicy(
+          mergeTailscaleNameserverPolicy(dnsConfig['nameserver-policy']),
+        ) || formatNameserverPolicy(DEFAULT_TAILSCALE_NAMESERVER_POLICY),
       hosts: formatHosts(hostsConfig) || '',
     })
   }, [])
@@ -346,7 +415,10 @@ export function DnsViewer({ ref }: { ref?: Ref<DialogRef> }) {
       'use-hosts': values.useHosts,
       'use-system-hosts': values.useSystemHosts,
       ipv6: values.ipv6,
-      'fake-ip-filter': parseList(values.fakeIpFilter),
+      'fake-ip-filter': mergeTailscaleFakeIpFilter(
+        parseFakeIpFilter(values.fakeIpFilter, values.fakeIpFilterMode),
+        values.fakeIpFilterMode,
+      ),
       'default-nameserver': parseList(values.defaultNameserver),
       nameserver: parseList(values.nameserver),
       'direct-nameserver-follow-policy': values.directNameserverFollowPolicy,
@@ -362,7 +434,9 @@ export function DnsViewer({ ref }: { ref?: Ref<DialogRef> }) {
       'direct-nameserver': parseList(values.directNameserver),
     }
 
-    const policy = parseNameserverPolicy(values.nameserverPolicy)
+    const policy = mergeTailscaleNameserverPolicy(
+      parseNameserverPolicy(values.nameserverPolicy),
+    )
     if (Object.keys(policy).length > 0) {
       dnsConfig['nameserver-policy'] = policy
     }
@@ -399,7 +473,10 @@ export function DnsViewer({ ref }: { ref?: Ref<DialogRef> }) {
       useHosts: DEFAULT_DNS_CONFIG['use-hosts'],
       useSystemHosts: DEFAULT_DNS_CONFIG['use-system-hosts'],
       ipv6: DEFAULT_DNS_CONFIG.ipv6,
-      fakeIpFilter: DEFAULT_DNS_CONFIG['fake-ip-filter'].join(', '),
+      fakeIpFilter: formatFakeIpFilter(
+        DEFAULT_DNS_CONFIG['fake-ip-filter'],
+        DEFAULT_DNS_CONFIG['fake-ip-filter-mode'],
+      ),
       defaultNameserver: DEFAULT_DNS_CONFIG['default-nameserver'].join(', '),
       nameserver: DEFAULT_DNS_CONFIG.nameserver.join(', '),
       fallback: DEFAULT_DNS_CONFIG.fallback.join(', '),
@@ -415,12 +492,12 @@ export function DnsViewer({ ref }: { ref?: Ref<DialogRef> }) {
         DEFAULT_DNS_CONFIG['fallback-filter'].ipcidr?.join(', ') || '',
       fallbackDomain:
         DEFAULT_DNS_CONFIG['fallback-filter'].domain?.join(', ') || '',
-      nameserverPolicy: '',
+      nameserverPolicy: formatNameserverPolicy(
+        DEFAULT_TAILSCALE_NAMESERVER_POLICY,
+      ),
       hosts: '',
     })
-
-    updateYamlFromValues()
-  }, [updateYamlFromValues])
+  }, [])
 
   const updateValuesFromYaml = useCallback(() => {
     try {
@@ -747,6 +824,7 @@ export function DnsViewer({ ref }: { ref?: Ref<DialogRef> }) {
               >
                 <MenuItem value="blacklist">blacklist</MenuItem>
                 <MenuItem value="whitelist">whitelist</MenuItem>
+                <MenuItem value="rule">rule</MenuItem>
               </Select>
             </FormControl>
           </Item>

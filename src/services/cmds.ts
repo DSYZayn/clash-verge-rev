@@ -34,6 +34,18 @@ export async function logoutTeam() {
   return invoke<void>('logout_team')
 }
 
+export async function connectTailscale() {
+  return invoke<ITeamStatus>('connect_tailscale')
+}
+
+export async function refreshTailscale() {
+  return invoke<ITeamStatus>('refresh_tailscale')
+}
+
+export async function logoutTailscale() {
+  return invoke<ITeamStatus>('logout_tailscale')
+}
+
 export async function activateTeamProfile() {
   return patchProfilesConfig({ current: 'RTEAMMANAGED' })
 }
