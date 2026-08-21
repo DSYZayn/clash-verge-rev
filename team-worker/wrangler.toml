@@ -3,6 +3,22 @@ name = "clash-verge-rev"
 main = "src/index.ts"
 compatibility_date = "2026-08-20"
 
+# Worker Logs for debugging (e.g. Tailscale API failures); traces stay off.
+[observability]
+enabled = false
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+persist = true
+head_sampling_rate = 1
+
 # The first deploy publishes a <name>.workers.dev endpoint. Add a custom
 # domain later in the Cloudflare dashboard (Worker -> Settings -> Domains &
 # Routes); dashboard-managed routes survive redeploys because this file
