@@ -24,7 +24,7 @@ const add = (keys, file) => {
 for (const file of files) {
   if (file.endsWith('x64-setup.exe')) add(['windows-x86_64', 'windows-x86_64-nsis'], file)
   else if (file.endsWith('arm64-setup.exe')) add(['windows-aarch64', 'windows-aarch64-nsis'], file)
-  else if (file.endsWith('aarch64.app.tar.gz')) add(['darwin-aarch64', 'darwin-aarch64-app'], file)
+  else if (file.endsWith('.app.tar.gz')) add(['darwin-aarch64', 'darwin-aarch64-app'], file)
   else if (file.endsWith('amd64.deb')) add(['linux-x86_64', 'linux-x86_64-deb'], file)
 }
 if (Object.keys(platforms).length === 0) throw new Error('no updater artifacts found in ' + assetsDir)

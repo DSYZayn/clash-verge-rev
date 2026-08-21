@@ -264,7 +264,6 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v7
         with:
-          pattern: clash-verge-team-*
           path: release-assets
           merge-multiple: true
 
@@ -278,6 +277,7 @@ jobs:
         env:
           RELEASE_TAG: team-latest
         run: |
+          ls -la release-assets
           base=$(grep -oP '"version"\s*:\s*"\K[^"]+' src-tauri/tauri.conf.json | head -1)
           export UPDATE_VERSION="$base-team.${{ github.run_number }}"
           echo "manifest version: $UPDATE_VERSION"
