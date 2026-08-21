@@ -180,6 +180,10 @@ jobs:
           $cargo = Get-Content $cargoPath -Raw
           $cargo = $cargo -replace '(?m)^version\s*=\s*"[^"]+"', ('version = "' + $version + '"')
           Set-Content $cargoPath $cargo -Encoding utf8
+          $lockPath = 'Cargo.lock'
+          $lock = Get-Content $lockPath -Raw
+          $lock = $lock -replace '(?s)(\[\[package\]\]\r?\nname = "clash-verge"\r?\nversion = ")[^"]+(")', ('$1' + $version + '$2')
+          Set-Content $lockPath $lock -Encoding utf8
           Write-Host "build version: $version"
 
       - name: Pnpm install and prebuild
