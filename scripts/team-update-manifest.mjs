@@ -17,7 +17,10 @@ const add = (keys, file) => {
   const sigFile = file + '.sig'
   if (!files.includes(sigFile)) throw new Error('missing signature file: ' + sigFile)
   const signature = readFileSync(join(assetsDir, sigFile), 'utf8').trim()
-  const url = 'https://github.com/' + repo + '/releases/download/' + tag + '/' + encodeURIComponent(file)
+  // GitHub normalizes uploaded asset names (spaces become dots); the updater
+  // URL must use the sanitized name or the download 404s.
+  const assetName = file.replace(/ /g, '.')
+  const url = 'https://github.com/' + repo + '/releases/download/' + tag + '/' + encodeURIComponent(assetName)
   for (const key of keys) platforms[key] = { signature, url }
 }
 
