@@ -152,6 +152,19 @@ jobs:
           $config | ConvertTo-Json | Set-Content -Path src-tauri/resources/team-config.json -Encoding utf8
           Write-Host 'team-config.json generated from repository variables.'
 
+      # The updater compares this stamped version against the client's, so
+      # every build must be unique: base version + run number.
+      - name: Stamp build version
+        if: *selected
+        shell: pwsh
+        run: |
+          $base = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $version = "$base-team.$env:GITHUB_RUN_NUMBER"
+          $teamConf = Get-Content src-tauri/tauri.team.conf.json -Raw | ConvertFrom-Json
+          $teamConf | Add-Member -NotePropertyName version -NotePropertyValue $version -Force
+          $teamConf | ConvertTo-Json -Depth 20 | Set-Content src-tauri/tauri.team.conf.json -Encoding utf8
+          Write-Host "build version: $version"
+
       - name: Pnpm install and prebuild
         if: *selected
         run: |
@@ -164,11 +177,11 @@ jobs:
           rustup target add ${{ matrix.target }} --toolchain 1.95.0 || rustup target add ${{ matrix.target }}
           rustup target list --installed
 
-      # Updater artifacts are disabled for team builds via the config merge
-      # file src-tauri/tauri.team.conf.json: the embedded updater endpoints
-      # point at the upstream project and must not be used here. Passing
-      # inline --config JSON through tauri-action is unreliable across
-      # shells, so a file path is used instead.
+      # The merge file src-tauri/tauri.team.conf.json points the updater at
+      # this repository's rolling team-latest release (the base config still
+      # references the upstream project). Passing inline --config JSON
+      # through tauri-action is unreliable across shells, so a file path is
+      # used instead.
       - name: Tauri build
         if: *selected
         uses: tauri-apps/tauri-action@v1
@@ -187,7 +200,7 @@ jobs:
         with:
           name: clash-verge-team-${{ matrix.id }}
           archive: false
-          path: target/${{ matrix.target }}/release/bundle/nsis/*.exe
+          path: target/${{ matrix.target }}/release/bundle/nsis/*.exe*
           if-no-files-found: error
 
       - name: Upload Artifacts (macOS)
@@ -196,7 +209,9 @@ jobs:
         with:
           name: clash-verge-team-${{ matrix.id }}
           archive: false
-          path: target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+          path: |
+            target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz*
           if-no-files-found: error
 
       - name: Upload Artifacts (Linux)
@@ -205,5 +220,49 @@ jobs:
         with:
           name: clash-verge-team-${{ matrix.id }}
           archive: false
-          path: target/${{ matrix.target }}/release/bundle/deb/*.deb
+          path: target/${{ matrix.target }}/release/bundle/deb/*.deb*
           if-no-files-found: error
+
+  # Rebuilds the rolling team-latest release after a full matrix run. Partial
+  # manual builds (workflow_dispatch with only some platforms selected) skip
+  # this job so the release never loses platforms.
+  publish:
+    name: Publish rolling release
+    needs: build
+    if: github.event_name == 'push' || (github.event.inputs.run_windows == 'true' && github.event.inputs.run_windows_arm64 == 'true' && github.event.inputs.run_macos_aarch64 == 'true' && github.event.inputs.run_linux_amd64 == 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: clash-verge-team-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Install Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24.19.0'
+
+      - name: Generate updater manifests
+        shell: bash
+        env:
+          RELEASE_TAG: team-latest
+        run: |
+          base=$(grep -oP '"version"\s*:\s*"\K[^"]+' src-tauri/tauri.conf.json | head -1)
+          export UPDATE_VERSION="$base-team.${{ github.run_number }}"
+          echo "manifest version: $UPDATE_VERSION"
+          node scripts/team-update-manifest.mjs release-assets
+
+      - name: Publish to rolling release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view team-latest >/dev/null 2>&1 || gh release create team-latest --title 'Team Latest' --notes 'Rolling Lab Clash Verge team build; updater manifest: update.json' --prerelease
+          gh release upload team-latest release-assets/* --clobber
