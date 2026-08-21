@@ -65,7 +65,7 @@ jobs:
             input: run_windows_arm64
           - os: macos-latest
             target: aarch64-apple-darwin
-            bundle: dmg
+            bundle: 'dmg,app'
             id: macos-aarch64
             input: run_macos_aarch64
           - os: ubuntu-22.04
