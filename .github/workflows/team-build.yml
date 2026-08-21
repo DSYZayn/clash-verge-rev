@@ -270,35 +270,23 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      # gh run download with an outer retry loop: actions/download-artifact
-      # exhausted its internal retries on transient blob-fetch failures twice,
-      # so the batch is retried wholesale here. Archive-less single-file
-      # artifacts land as bare files, zipped artifacts as one directory each;
-      # everything is flattened into release-assets.
+      - name: Install Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24.19.0'
+
+      # The artifacts API serves archive:false uploads as raw bytes, which
+      # breaks gh run download / download-artifact ("not a valid zip file").
+      # The helper sniffs the zip magic per artifact and retries each
+      # download, so transient blob-fetch failures no longer kill the job.
       - name: Download build artifacts
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PUBLISH_FROM_RUN: ${{ github.event.inputs.publish_from_run }}
         run: |
-          SOURCE_RUN="${PUBLISH_FROM_RUN:-$GITHUB_RUN_ID}"
-          mkdir -p release-assets
-          ok=0
-          for i in 1 2 3; do
-            rm -rf .artifact-dl && mkdir .artifact-dl
-            if gh run download "$SOURCE_RUN" --repo "$GITHUB_REPOSITORY" --dir .artifact-dl; then ok=1; break; fi
-            echo "artifact download attempt $i failed"
-            sleep 15
-          done
-          [ "$ok" = 1 ] || { echo "artifact download failed after 3 attempts"; exit 1; }
-          find .artifact-dl -mindepth 1 -type f | while read -r f; do mv -f "$f" "release-assets/$(basename "$f")"; done
-          rm -rf .artifact-dl
+          node scripts/download-run-artifacts.mjs "${PUBLISH_FROM_RUN:-$GITHUB_RUN_ID}" release-assets
           ls -la release-assets
-
-      - name: Install Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: '24.19.0'
 
       - name: Generate updater manifests
         shell: bash
