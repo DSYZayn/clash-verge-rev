@@ -34,6 +34,10 @@ export async function logoutTeam() {
   return invoke<void>('logout_team')
 }
 
+export async function activateTeamProfile() {
+  return patchProfilesConfig({ current: 'RTEAMMANAGED' })
+}
+
 export async function enhanceProfiles() {
   return (
     (await invoke<ValidationOutcome>('enhance_profiles')).status === 'valid'

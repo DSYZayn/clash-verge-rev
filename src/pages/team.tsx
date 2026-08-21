@@ -20,6 +20,7 @@ import { useCallback, useState } from 'react'
 
 import { BasePage } from '@/components/base'
 import {
+  activateTeamProfile,
   getTeamStatus,
   loginTeam,
   logoutTeam,
@@ -128,6 +129,15 @@ const TeamPage = () => {
               </>
             )}
 
+            {data?.account?.devicesOnline !== undefined && (
+              <>
+                <Divider sx={{ my: 2 }} />
+                <Typography variant="body2" color="text.secondary">
+                  在线设备：{data.account.devicesOnline} 台（最近 10 分钟内活跃）
+                </Typography>
+              </>
+            )}
+
             <Divider sx={{ my: 2 }} />
             <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap' }}>
               {!data?.authenticated ? (
@@ -149,6 +159,14 @@ const TeamPage = () => {
                   >
                     同步团队配置
                   </Button>
+                  {data?.managedProfileInstalled && !data?.managedProfileActive && (
+                    <Button
+                      disabled={Boolean(action)}
+                      onClick={() => run('activate', activateTeamProfile)}
+                    >
+                      使用团队配置
+                    </Button>
+                  )}
                   <Button
                     disabled={Boolean(action)}
                     onClick={() => run('account', refreshTeamAccount)}

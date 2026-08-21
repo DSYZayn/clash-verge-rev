@@ -273,6 +273,7 @@ interface ITeamAccount {
   team?: string
   enabled: boolean
   quota?: ITeamQuota
+  devicesOnline?: number
 }
 
 interface ITeamStatus {
@@ -281,6 +282,7 @@ interface ITeamStatus {
   account?: ITeamAccount
   lastSyncAt?: number
   managedProfileInstalled: boolean
+  managedProfileActive?: boolean
 }
 
 interface IVergeTestItem {

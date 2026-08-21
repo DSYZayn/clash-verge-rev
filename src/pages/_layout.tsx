@@ -30,11 +30,11 @@ import { Outlet, useNavigate } from 'react-router'
 
 import iconDark from '@/assets/image/icon_dark.svg?react'
 import iconLight from '@/assets/image/icon_light.svg?react'
-import LogoSvg from '@/assets/image/logo.svg?react'
 import { BaseErrorBoundary } from '@/components/base'
 import { LayoutItem } from '@/components/layout/layout-item'
 import { LayoutTraffic } from '@/components/layout/layout-traffic'
 import { NoticeManager } from '@/components/layout/notice-manager'
+import { TeamLoginDialog } from '@/components/team/team-login-dialog'
 import { ServiceMigrationDialog } from '@/components/layout/service-migration-dialog'
 import { SysproxyPrivilegeDialog } from '@/components/layout/sysproxy-privilege-dialog'
 import { UpdateButton } from '@/components/layout/update-button'
@@ -263,6 +263,7 @@ const Layout = () => {
     <ThemeProvider theme={theme}>
       {/* 左侧底部窗口控制按钮 */}
       <NoticeManager position={verge?.notice_position} />
+      <TeamLoginDialog />
       <ServiceMigrationDialog />
       <SysproxyPrivilegeDialog />
       <div
@@ -336,7 +337,17 @@ const Layout = () => {
                   }}
                   inheritViewBox
                 />
-                <LogoSvg fill={isDark ? 'white' : 'black'} />
+                <span
+                  style={{
+                    fontSize: 19,
+                    fontWeight: 700,
+                    lineHeight: '27px',
+                    color: isDark ? '#ffffff' : '#000000',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  Lab Clash Verge
+                </span>
               </div>
               <UpdateButton className="the-newbtn" />
             </div>

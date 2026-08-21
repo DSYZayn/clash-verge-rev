@@ -28,6 +28,7 @@ use tokio::{
 
 pub const MANAGED_PROFILE_UID: &str = "RTEAMMANAGED";
 const SESSION_FILE: &str = "team-session.enc";
+const DEVICE_ID_FILE: &str = "team-device-id";
 static BACKGROUND_STARTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Deserialize)]
@@ -115,6 +116,7 @@ pub struct TeamStatus {
     pub account: Option<TeamAccount>,
     pub last_sync_at: Option<u64>,
     pub managed_profile_installed: bool,
+    pub managed_profile_active: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,6 +147,21 @@ fn default_token_type() -> String {
 }
 const fn default_expires_in() -> u64 {
     900
+}
+
+// Stable per-install device id (not secret): survives logout, and feeds the
+// worker's online-device counter via the x-team-device header.
+fn device_id() -> Result<String> {
+    let path = dirs::app_home_dir()?.join(DEVICE_ID_FILE);
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let trimmed = existing.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.into());
+        }
+    }
+    let id = random_urlsafe(24)?;
+    std::fs::write(&path, &id)?;
+    Ok(id)
 }
 
 pub fn is_managed_profile_uid(uid: &str) -> bool {
@@ -396,17 +413,17 @@ async fn usable_session() -> Result<TeamSession> {
 pub async fn status() -> Result<TeamStatus> {
     let configured = load_config().is_ok_and(|config| config.enabled);
     let session = load_session()?;
-    let managed_profile_installed = Config::profiles()
-        .await
-        .latest_arc()
-        .get_item(MANAGED_PROFILE_UID)
-        .is_ok();
+    let profiles = Config::profiles().await;
+    let latest = profiles.latest_arc();
+    let managed_profile_installed = latest.get_item(MANAGED_PROFILE_UID).is_ok();
+    let managed_profile_active = latest.is_current_profile_index(&MANAGED_PROFILE_UID.into());
     Ok(TeamStatus {
         configured,
         authenticated: session.as_ref().is_some_and(|value| !value.access_token.is_empty()),
         account: session.as_ref().and_then(|value| value.account.clone()),
         last_sync_at: session.as_ref().and_then(|value| value.last_sync_at),
         managed_profile_installed,
+        managed_profile_active,
     })
 }
 
@@ -439,6 +456,7 @@ pub async fn refresh_account() -> Result<TeamStatus> {
     let mut account = reqwest::Client::new()
         .get(endpoint(&config.api_base_url, &config.account_path)?)
         .bearer_auth(&session.access_token)
+        .header("x-team-device", device_id()?)
         .send()
         .await?
         .error_for_status()?
@@ -475,7 +493,8 @@ pub async fn sync_managed_profile() -> Result<TeamStatus> {
     let mut session = usable_session().await?;
     let mut request = reqwest::Client::new()
         .get(endpoint(&config.api_base_url, &config.profile_path)?)
-        .bearer_auth(&session.access_token);
+        .bearer_auth(&session.access_token)
+        .header("x-team-device", device_id()?);
     if let Some(etag) = session.etag.as_ref() {
         request = request.header(reqwest::header::IF_NONE_MATCH, etag);
     }
@@ -578,6 +597,19 @@ pub async fn init_background_sync() {
     if !config.enabled {
         return;
     }
+    // Presence heartbeat between full syncs: feeds the worker's online-device
+    // counter and keeps the account page's quota display fresh.
+    AsyncHandler::spawn(|| async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(300)).await;
+            if load_session().ok().flatten().is_none() {
+                continue;
+            }
+            if let Err(error) = refresh_account().await {
+                logging!(debug, Type::Config, "team presence heartbeat failed: {error:#}");
+            }
+        }
+    });
     AsyncHandler::spawn(move || async move {
         tokio::time::sleep(Duration::from_secs(15)).await;
         loop {
