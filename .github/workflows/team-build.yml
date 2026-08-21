@@ -1,17 +1,18 @@
 name: Team Edition Build
 
 on:
+  # Client releases build from the default branch only. Topic branches (e.g.
+  # codex/team-edition) drive the Worker deploy; merging them into dev is the
+  # single release signal, so one logical change builds exactly once.
   push:
     branches:
-      - main
       - dev
-      - 'codex/**'
-      - 'team/**'
     paths-ignore:
       - 'team-worker/**'
       - 'docs/**'
       - '.github/workflows/team-worker-ci.yml'
       - '.github/workflows/team-worker-deploy.yml'
+      - '.github/workflows/team-resource-push.yml'
   workflow_dispatch:
     inputs:
       run_windows:
