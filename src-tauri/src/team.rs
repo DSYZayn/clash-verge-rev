@@ -396,15 +396,18 @@ async fn tailscale_up(key: &str) -> Result<()> {
         .arg(path_arg)
         .args(if cfg!(windows) { &["--unattended"][..] } else { &[][..] })
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .output()
         .await
         .map_err(|error| anyhow::anyhow!("failed to start tailscale up: {error}"));
     let _ = std::fs::remove_file(path);
-    let result = result?;
-    if !result.success() {
-        bail!("tailscale up failed (exit status {})", result);
+    let output = result?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail: String = stderr.trim().chars().take(300).collect();
+        if detail.is_empty() {
+            bail!("tailscale up failed (exit status {})", output.status);
+        }
+        bail!("tailscale up failed (exit status {}): {detail}", output.status);
     }
     Ok(())
 }
@@ -702,6 +705,37 @@ pub async fn status() -> Result<TeamStatus> {
     })
 }
 
+async fn issue_tailscale_key(device_id: &str, hostname: &str) -> Result<TailscaleKeyResponse> {
+    let response = team_post(
+        TAILSCALE_KEY_PATH,
+        serde_json::json!({
+            "deviceId": device_id,
+            "hostname": hostname,
+            "reusable": false,
+            "ephemeral": true,
+        }),
+    )
+    .await?;
+    let issued = response.json::<TailscaleKeyResponse>().await?;
+    if issued.key.trim().is_empty() {
+        bail!("Worker returned an empty Tailscale authorization key")
+    }
+    Ok(issued)
+}
+
+/// Right after `tailscale up` the backend is still Starting and Self.ID is
+/// absent; poll until the node identity shows up (or give up after ~10s).
+async fn wait_for_node_identity() -> TailscaleStatus {
+    let mut snapshot = tailscale_status_snapshot().await;
+    for _ in 0..20 {
+        if snapshot.node_id.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        snapshot = tailscale_status_snapshot().await;
+    }
+    snapshot
+}
 pub async fn tailscale_connect() -> Result<TeamStatus> {
     let device_id = device_id()?;
     let before = tailscale_status_snapshot().await;
@@ -717,37 +751,38 @@ pub async fn tailscale_connect() -> Result<TeamStatus> {
         .or_else(|| gethostname::gethostname().into_string().ok())
         .filter(|value| !value.trim().is_empty());
     let hostname = hostname.context("unable to determine the Tailscale hostname")?;
-    let response = team_post(
-        TAILSCALE_KEY_PATH,
-        serde_json::json!({
-            "deviceId": device_id,
-            "hostname": &hostname,
-            "reusable": false,
-            "ephemeral": true,
-        }),
-    )
-    .await?;
-    let issued = response.json::<TailscaleKeyResponse>().await?;
-    if issued.key.trim().is_empty() {
-        bail!("Worker returned an empty Tailscale authorization key")
+    // Mint a fresh key per attempt (keys are single-use). The retry first
+    // logs out to clear stale server-side node state - e.g. an ephemeral node
+    // deleted while offline - which otherwise makes `tailscale up` exit 1.
+    let mut up_error = None;
+    for attempt in 0..2 {
+        if attempt > 0 {
+            let _ = tailscale_output(&["logout"]).await;
+        }
+        let issued = issue_tailscale_key(&device_id, &hostname).await?;
+        match tailscale_up(&issued.key).await {
+            Ok(()) => {
+                let after = wait_for_node_identity().await;
+                let node_id = after
+                    .node_id
+                    .clone()
+                    .context("Tailscale status did not include Self.ID")?;
+                let reconcile = tailscale_reconcile(&device_id, &after).await?;
+                let mut session = usable_session().await?;
+                session.tailscale = Some(TailscaleInfo {
+                    node_id: Some(node_id),
+                    key_issued_at: issued.issued_at,
+                    key_expires_at: issued.expires_at,
+                    role: reconcile.role.or(issued.role),
+                    tag: reconcile.tag.or(issued.tag),
+                });
+                save_session(&session)?;
+                return status().await;
+            }
+            Err(error) => up_error = Some(error),
+        }
     }
-    tailscale_up(&issued.key).await?;
-    let after = tailscale_status_snapshot().await;
-    let node_id = after
-        .node_id
-        .clone()
-        .context("Tailscale status did not include Self.ID")?;
-    let reconcile = tailscale_reconcile(&device_id, &after).await?;
-    let mut session = usable_session().await?;
-    session.tailscale = Some(TailscaleInfo {
-        node_id: Some(node_id),
-        key_issued_at: issued.issued_at,
-        key_expires_at: issued.expires_at,
-        role: reconcile.role.or(issued.role),
-        tag: reconcile.tag.or(issued.tag),
-    });
-    save_session(&session)?;
-    status().await
+    Err(up_error.unwrap_or_else(|| anyhow::anyhow!("tailscale up failed")))
 }
 
 pub async fn tailscale_refresh() -> Result<TeamStatus> {
