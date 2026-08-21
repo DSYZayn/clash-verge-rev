@@ -1,12 +1,12 @@
 name: Team Edition Build
 
 on:
-  # Client releases build from the default branch only. Topic branches (e.g.
-  # codex/team-edition) drive the Worker deploy; merging them into dev is the
-  # single release signal, so one logical change builds exactly once.
+  # Single-branch model: codex/team-edition is the only branch (GitHub default
+  # branch and the Worker's production branch), so one push builds the client
+  # exactly once. Worker-only paths never trigger client builds.
   push:
     branches:
-      - dev
+      - codex/team-edition
     paths-ignore:
       - 'team-worker/**'
       - 'docs/**'
@@ -15,6 +15,11 @@ on:
       - '.github/workflows/team-resource-push.yml'
   workflow_dispatch:
     inputs:
+      publish_from_run:
+        description: 'Skip the build; publish artifacts from an existing run ID'
+        required: false
+        type: string
+        default: ''
       run_windows:
         description: 'Build Windows x64'
         required: false
@@ -49,6 +54,7 @@ concurrency:
 jobs:
   build:
     environment: team-production
+    if: github.event_name == 'push' || github.event.inputs.publish_from_run == ''
     strategy:
       fail-fast: false
       matrix:
@@ -249,23 +255,45 @@ jobs:
 
   # Rebuilds the rolling team-latest release after a full matrix run. Partial
   # manual builds (workflow_dispatch with only some platforms selected) skip
-  # this job so the release never loses platforms.
+  # this job so the release never loses platforms. Dispatching with
+  # publish_from_run set skips the build and republishes an earlier run's
+  # artifacts (e.g. after a transient download failure in a previous publish).
   publish:
     name: Publish rolling release
     needs: build
-    if: github.event_name == 'push' || (github.event.inputs.run_windows == 'true' && github.event.inputs.run_windows_arm64 == 'true' && github.event.inputs.run_macos_aarch64 == 'true' && github.event.inputs.run_linux_amd64 == 'true')
+    if: ${{ always() && !cancelled() && ((needs.build.result == 'success' && (github.event_name == 'push' || (github.event.inputs.run_windows == 'true' && github.event.inputs.run_windows_arm64 == 'true' && github.event.inputs.run_macos_aarch64 == 'true' && github.event.inputs.run_linux_amd64 == 'true'))) || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_from_run != '')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
+      # gh run download with an outer retry loop: actions/download-artifact
+      # exhausted its internal retries on transient blob-fetch failures twice,
+      # so the batch is retried wholesale here. Archive-less single-file
+      # artifacts land as bare files, zipped artifacts as one directory each;
+      # everything is flattened into release-assets.
       - name: Download build artifacts
-        uses: actions/download-artifact@v7
-        with:
-          path: release-assets
-          merge-multiple: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLISH_FROM_RUN: ${{ github.event.inputs.publish_from_run }}
+        run: |
+          SOURCE_RUN="${PUBLISH_FROM_RUN:-$GITHUB_RUN_ID}"
+          mkdir -p release-assets
+          ok=0
+          for i in 1 2 3; do
+            rm -rf .artifact-dl && mkdir .artifact-dl
+            if gh run download "$SOURCE_RUN" --repo "$GITHUB_REPOSITORY" --dir .artifact-dl; then ok=1; break; fi
+            echo "artifact download attempt $i failed"
+            sleep 15
+          done
+          [ "$ok" = 1 ] || { echo "artifact download failed after 3 attempts"; exit 1; }
+          find .artifact-dl -mindepth 1 -type f | while read -r f; do mv -f "$f" "release-assets/$(basename "$f")"; done
+          rm -rf .artifact-dl
+          ls -la release-assets
 
       - name: Install Node
         uses: actions/setup-node@v7
@@ -276,10 +304,18 @@ jobs:
         shell: bash
         env:
           RELEASE_TAG: team-latest
+          PUBLISH_FROM_RUN: ${{ github.event.inputs.publish_from_run }}
         run: |
-          ls -la release-assets
-          base=$(grep -oP '"version"\s*:\s*"\K[^"]+' src-tauri/tauri.conf.json | head -1)
-          export UPDATE_VERSION="$base-team.${{ github.run_number }}"
+          if [ -n "$PUBLISH_FROM_RUN" ]; then
+            # Republishing an earlier run: take the version its payloads were
+            # stamped with, not this dispatch's run number.
+            ver=$(ls release-assets | grep -E '_x64-setup\.exe$' | head -1 | sed -E 's/^[^_]*_//; s/_x64-setup\.exe$//')
+            [ -n "$ver" ] || { echo "cannot derive version from downloaded artifacts"; exit 1; }
+            export UPDATE_VERSION="$ver"
+          else
+            base=$(grep -oP '"version"\s*:\s*"\K[^"]+' src-tauri/tauri.conf.json | head -1)
+            export UPDATE_VERSION="$base-team.${{ github.run_number }}"
+          fi
           echo "manifest version: $UPDATE_VERSION"
           node scripts/team-update-manifest.mjs release-assets
 

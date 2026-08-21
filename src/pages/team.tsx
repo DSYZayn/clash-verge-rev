@@ -28,9 +28,14 @@ import {
   syncTeamProfile,
 } from '@/services/cmds'
 import { useQuery } from '@/services/query-client'
+import { errorDetail } from '@/services/notice-service'
 import parseTraffic from '@/utils/parse-traffic'
 
 const formatTraffic = (value: number) => parseTraffic(value).join(' ')
+
+// Tauri commands reject with a structured CommandFailure; String() on it
+// renders "[object Object]", so unwrap the human-readable detail first.
+const reasonText = (reason: unknown) => errorDetail(reason) || String(reason)
 
 const TeamPage = () => {
   const { data, refetch, isFetching } = useQuery({
@@ -49,7 +54,7 @@ const TeamPage = () => {
         await operation()
         await refetch()
       } catch (reason) {
-        setError(errorPrefix + String(reason))
+        setError(errorPrefix + reasonText(reason))
       } finally {
         setAction(undefined)
       }
@@ -65,7 +70,7 @@ const TeamPage = () => {
     try {
       await loginTeam()
     } catch (reason) {
-      setError(`登录失败：${String(reason)}`)
+      setError(`登录失败：${reasonText(reason)}`)
       setAction(undefined)
       return
     }

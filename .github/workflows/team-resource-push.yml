@@ -15,7 +15,7 @@ name: Team Resource Push
 #   UPSTREAM_SUBSCRIPTION_URL, WORKER_ADMIN_URL, ADMIN_API_TOKEN
 #
 # schedule and workflow_dispatch only fire when this file exists on the
-# default branch (dev). If the runner machine is offline, scheduled jobs
+# default branch (codex/team-edition). If the runner machine is offline, scheduled jobs
 # queue for up to 24h and run when it comes back; missed runs are harmless
 # because the Worker keeps serving the last pushed copy.
 on:

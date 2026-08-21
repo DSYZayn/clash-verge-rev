@@ -11,6 +11,7 @@ import {
 import { useCallback, useState } from 'react'
 
 import { getTeamStatus, loginTeam, syncTeamProfile } from '@/services/cmds'
+import { errorDetail } from '@/services/notice-service'
 import { useQuery } from '@/services/query-client'
 
 // 启动引导：团队功能已配置但未登录时弹出一次，可关闭；关闭后本次运行内不再出现。
@@ -35,7 +36,7 @@ export const TeamLoginDialog = () => {
       setDismissed(true)
       syncTeamProfile().catch(() => {})
     } catch (reason) {
-      setError(String(reason))
+      setError(errorDetail(reason) || String(reason))
     } finally {
       setBusy(false)
     }

@@ -51,10 +51,12 @@ before building:
 ## GitHub Actions builds
 
 [`.github/workflows/team-build.yml`](../.github/workflows/team-build.yml) builds
-the desktop client on every push to `main`, `dev`, `codex/**`, or `team/**`
-branches, and can also be started manually from the Actions tab with a
-per-platform selection. Installers are uploaded as workflow artifacts named
-`clash-verge-team-<platform>`.
+the desktop client on every push to `codex/team-edition` (the repository's
+only branch: GitHub default and the Worker's production branch), and can also
+be started manually from the Actions tab with a per-platform selection. A
+successful full-matrix run refreshes the rolling `team-latest` release,
+including the updater manifests; dispatching with `publish_from_run` set to an
+earlier run ID republishes that run's artifacts without rebuilding.
 
 Real deployment values do not belong in git. Instead of editing
 `team-config.json` before a CI build, set variables in the GitHub Environment

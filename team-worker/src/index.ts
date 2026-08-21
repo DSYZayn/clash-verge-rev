@@ -4,11 +4,17 @@ import schemaSql from '../migrations/0001_init.sql'
 import devicesSql from '../migrations/0002_devices.sql'
 
 // D1 exec treats each input line as its own statement: a pretty-printed
-// multi-line CREATE TABLE fails with "incomplete input". Flatten the
-// migration into a single line; the schema contains no string literals,
-// so collapsing whitespace is safe.
+// multi-line CREATE TABLE fails with "incomplete input". Flatten each
+// migration into a single line; the schema contains no string literals, so
+// collapsing whitespace is safe. Strip `--` comments first: once flattened,
+// everything after a comment marker would become part of that comment.
 const schemaBatch = [schemaSql, devicesSql]
-  .map((sql) => sql.replace(/\s+/g, ' ').replace(/;+\s*$/, ''))
+  .map((sql) =>
+    sql
+      .replace(/--[^\n]*/g, '')
+      .replace(/\s+/g, ' ')
+      .replace(/;+\s*$/, ''),
+  )
   .join(';')
 
 interface Env {

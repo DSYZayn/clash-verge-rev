@@ -106,6 +106,7 @@ pub struct TeamAccount {
     #[serde(default)]
     pub enabled: bool,
     pub quota: Option<TeamQuota>,
+    pub devices_online: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -442,6 +443,9 @@ pub async fn logout() -> Result<()> {
         {
             logging!(error, Type::Cmd, "managed profile cleanup on logout failed: {error}");
         }
+        // Deleting a non-current profile emits no frontend event; push the
+        // refresh explicitly so the subscription list drops the entry at once.
+        handle::Handle::refresh_profiles();
     }
     let path = session_path()?;
     if path.exists() {
