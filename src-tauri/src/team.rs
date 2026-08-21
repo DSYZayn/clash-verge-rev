@@ -716,11 +716,6 @@ pub async fn tailscale_connect() -> Result<TeamStatus> {
         .node_id
         .clone()
         .context("Tailscale status did not include Self.ID")?;
-    let hostname = after
-        .device_name
-        .clone()
-        .or(Some(hostname))
-        .context("Tailscale status did not include a hostname")?;
     let reconcile = tailscale_reconcile(&device_id, &after).await?;
     let mut session = usable_session().await?;
     session.tailscale = Some(TailscaleInfo {

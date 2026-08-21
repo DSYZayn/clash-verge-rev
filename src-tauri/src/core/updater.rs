@@ -106,7 +106,7 @@ fn version_lte(a: &str, b: &str) -> bool {
             .collect::<Vec<_>>();
         let pre = sections
             .next()
-            .map(|part| part.split('.').collect::<Vec<_>>())
+            .map(|part| part.split('.').map(str::to_owned).collect::<Vec<_>>())
             .unwrap_or_default();
         (main, pre)
     };
