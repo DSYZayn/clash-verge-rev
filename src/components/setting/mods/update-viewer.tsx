@@ -1,6 +1,6 @@
 import { alpha, Box, Button, LinearProgress } from '@mui/material'
 import { open as openUrl } from '@tauri-apps/plugin-shell'
-import type { DownloadEvent } from '@tauri-apps/plugin-updater'
+import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater'
 import { useLockFn } from 'ahooks'
 import type { Ref } from 'react'
 import {
@@ -18,6 +18,7 @@ import { BaseDialog, DialogRef } from '@/components/base'
 import { useUpdate } from '@/hooks/use-update'
 import { restartApp } from '@/services/cmds'
 import { showNotice } from '@/services/notice-service'
+import { getCacheData } from '@/services/query-client'
 import { useSetUpdateState, useUpdateState } from '@/services/states'
 
 type MarkdownNode = {
@@ -145,6 +146,10 @@ export function UpdateViewer({ ref }: { ref?: Ref<DialogRef> }) {
   const setUpdateState = useSetUpdateState()
 
   const { updateInfo } = useUpdate()
+  // Snapshot of the shared update query captured when the dialog opens, so a
+  // manually triggered check renders even when the auto-check query is disabled.
+  const [updateSnapshot, setUpdateSnapshot] = useState<Update | null>(null)
+  const activeUpdate = updateInfo !== undefined ? updateInfo : updateSnapshot
 
   const [downloaded, setDownloaded] = useState(0)
   const [total, setTotal] = useState(0)
@@ -157,7 +162,10 @@ export function UpdateViewer({ ref }: { ref?: Ref<DialogRef> }) {
   }, [downloaded, total])
 
   useImperativeHandle(ref, () => ({
-    open: () => setOpen(true),
+    open: () => {
+      setUpdateSnapshot(getCacheData<Update | null>(['checkUpdate']) ?? null)
+      setOpen(true)
+    },
     close: () => setOpen(false),
   }))
 
@@ -178,24 +186,24 @@ export function UpdateViewer({ ref }: { ref?: Ref<DialogRef> }) {
 
   const activeLanguage = i18n.resolvedLanguage ?? i18n.language
   const markdownContent = useMemo(() => {
-    if (!updateInfo?.body) {
+    if (!activeUpdate?.body) {
       return t('settings.modals.update.messages.available')
     }
     if (!shouldShowReleaseNotes(activeLanguage)) {
       return t('settings.modals.update.messages.available')
     }
-    return updateInfo?.body
-  }, [activeLanguage, t, updateInfo])
+    return activeUpdate?.body
+  }, [activeLanguage, t, activeUpdate])
 
   const breakChangeFlag = useMemo(() => {
-    if (!updateInfo?.body) {
+    if (!activeUpdate?.body) {
       return false
     }
-    return updateInfo?.body.toLowerCase().includes('break change')
-  }, [updateInfo])
+    return activeUpdate?.body.toLowerCase().includes('break change')
+  }, [activeUpdate])
 
   const onUpdate = useLockFn(async () => {
-    if (!updateInfo?.body) return
+    if (!activeUpdate?.body) return
     if (breakChangeFlag) {
       showNotice.error('settings.modals.update.messages.breakChangeError')
       return
@@ -232,7 +240,7 @@ export function UpdateViewer({ ref }: { ref?: Ref<DialogRef> }) {
     }
 
     try {
-      await updateInfo.downloadAndInstall(onDownloadEvent)
+      await activeUpdate.downloadAndInstall(onDownloadEvent)
       await restartApp()
     } catch (err: any) {
       showNotice.error(err)
@@ -268,7 +276,7 @@ export function UpdateViewer({ ref }: { ref?: Ref<DialogRef> }) {
             }}
           >
             {t('settings.modals.update.title', {
-              version: updateInfo?.version ?? '',
+              version: activeUpdate?.version ?? '',
             })}
           </Box>
           <Button
@@ -276,8 +284,14 @@ export function UpdateViewer({ ref }: { ref?: Ref<DialogRef> }) {
             size="small"
             sx={{ whiteSpace: 'nowrap' }}
             onClick={() => {
+              const target = activeUpdate?.version
+              if (!target) return
+              // Team builds are published to the fork's rolling team-latest release;
+              // vanilla builds keep the upstream per-version tag page.
               openUrl(
-                `https://github.com/clash-verge-rev/clash-verge-rev/releases/tag/v${updateInfo?.version}`,
+                target?.includes('-team')
+                  ? 'https://github.com/DSYZayn/clash-verge-rev/releases/tag/team-latest'
+                  : `https://github.com/clash-verge-rev/clash-verge-rev/releases/tag/v${target}`,
               )
             }}
           >

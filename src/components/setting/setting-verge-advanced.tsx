@@ -14,6 +14,7 @@ import {
   openLogsDir,
 } from '@/services/cmds'
 import { showNotice } from '@/services/notice-service'
+import { setCacheData } from '@/services/query-client'
 import { checkUpdateSafe as checkUpdate } from '@/services/update'
 import { version } from '@root/package.json'
 
@@ -47,6 +48,9 @@ const SettingVergeAdvanced = ({ onError: _ }: Props) => {
     try {
       const info = await checkUpdate()
       updateLastCheckTime()
+      // Keep the shared update query in sync so the dialog below (and the
+      // layout update badge) render this fresh result instead of stale cache.
+      setCacheData(['checkUpdate'], info)
       if (!info?.available) {
         showNotice.success(
           'settings.components.verge.advanced.notifications.latestVersion',
