@@ -500,7 +500,7 @@ async function tailscaleAccessToken(
   }
   if (!response.ok) {
     const body = await response.text().catch(() => '')
-    console.error('Tailscale OAuth token request failed:', response.status)
+    console.error('Tailscale OAuth token request failed:', response.status, safeTailscaleMessage(body, config.clientSecret))
     throw new Response(JSON.stringify({
       error: 'Tailscale API error',
       tailscale: { status: response.status, message: safeTailscaleMessage(body, config.clientSecret) || response.statusText },
