@@ -178,7 +178,7 @@ jobs:
           $package | ConvertTo-Json -Depth 20 | Set-Content package.json -Encoding utf8
           $cargoPath = 'src-tauri/Cargo.toml'
           $cargo = Get-Content $cargoPath -Raw
-          $cargo = $cargo -replace '(?m)^version\s*=\s*"[^"]+"', "version = \"$version\""
+          $cargo = $cargo -replace '(?m)^version\s*=\s*"[^"]+"', ('version = "' + $version + '"')
           Set-Content $cargoPath $cargo -Encoding utf8
           Write-Host "build version: $version"
 
