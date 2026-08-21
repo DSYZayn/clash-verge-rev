@@ -29,11 +29,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest_path.display());
     }
 
-    #[cfg(feature = "clippy")]
-    {
-        println!("cargo:warning=Skipping tauri_build during Clippy");
-    }
-
     #[cfg(not(feature = "clippy"))]
     tauri_build::build();
 

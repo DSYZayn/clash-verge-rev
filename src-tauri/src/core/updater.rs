@@ -93,25 +93,31 @@ impl SilentUpdater {
     }
 }
 
-/// Compares numeric version components after stripping `v` and prerelease suffixes.
+/// Compares semantic-version components, including prerelease identifiers.
 fn version_lte(a: &str, b: &str) -> bool {
-    let parse = |v: &str| -> Vec<u64> {
-        v.trim_start_matches('v')
+    let parse = |v: &str| {
+        let without_build = v.trim_start_matches('v').split('+').next().unwrap_or("");
+        let mut sections = without_build.splitn(2, '-');
+        let main = sections
+            .next()
+            .unwrap_or("")
             .split('.')
-            .filter_map(|part| {
-                let numeric = part.split('-').next().unwrap_or("0");
-                numeric.parse::<u64>().ok()
-            })
-            .collect()
+            .map(|part| part.parse::<u64>().unwrap_or(0))
+            .collect::<Vec<_>>();
+        let pre = sections
+            .next()
+            .map(|part| part.split('.').collect::<Vec<_>>())
+            .unwrap_or_default();
+        (main, pre)
     };
 
-    let a_parts = parse(a);
-    let b_parts = parse(b);
-    let len = a_parts.len().max(b_parts.len());
+    let (a_main, a_pre) = parse(a);
+    let (b_main, b_pre) = parse(b);
+    let len = a_main.len().max(b_main.len());
 
     for i in 0..len {
-        let av = a_parts.get(i).copied().unwrap_or(0);
-        let bv = b_parts.get(i).copied().unwrap_or(0);
+        let av = a_main.get(i).copied().unwrap_or(0);
+        let bv = b_main.get(i).copied().unwrap_or(0);
         if av < bv {
             return true;
         }
@@ -119,7 +125,35 @@ fn version_lte(a: &str, b: &str) -> bool {
             return false;
         }
     }
-    true // equal
+
+    // A release version is newer than any prerelease with the same main
+    // components.
+    if a_pre.is_empty() {
+        return b_pre.is_empty();
+    }
+    if b_pre.is_empty() {
+        return true;
+    }
+
+    for i in 0..a_pre.len().max(b_pre.len()) {
+        let Some(a_token) = a_pre.get(i) else {
+            return true;
+        };
+        let Some(b_token) = b_pre.get(i) else {
+            return false;
+        };
+        let a_numeric = a_token.parse::<u64>().ok();
+        let b_numeric = b_token.parse::<u64>().ok();
+        match (a_numeric, b_numeric) {
+            (Some(av), Some(bv)) if av != bv => return av < bv,
+            (Some(_), None) => return true,
+            (None, Some(_)) => return false,
+            _ if a_token != b_token => return a_token < b_token,
+            _ => {}
+        }
+    }
+
+    true
 }
 
 /// Maps UI language to one of the three NSIS translations, defaulting to English.

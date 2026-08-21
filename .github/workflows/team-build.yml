@@ -158,17 +158,28 @@ jobs:
           $config | ConvertTo-Json | Set-Content -Path src-tauri/resources/team-config.json -Encoding utf8
           Write-Host 'team-config.json generated from repository variables.'
 
-      # The updater compares this stamped version against the client's, so
-      # every build must be unique: base version + run number.
+      # Stamp every version-bearing input. The patch bump keeps a team build
+      # newer than clients built from the un-stamped base version, while the
+      # numeric prerelease suffix makes successive rolling builds ordered.
       - name: Stamp build version
         if: *selected
         shell: pwsh
         run: |
           $base = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
-          $version = "$base-team.$env:GITHUB_RUN_NUMBER"
+          $parts = $base.Split('.')
+          if ($parts.Count -ne 3) { throw "base version must be MAJOR.MINOR.PATCH: $base" }
+          $patch = [int]$parts[2] + 1
+          $version = "$($parts[0]).$($parts[1]).$patch-team.$env:GITHUB_RUN_NUMBER"
           $teamConf = Get-Content src-tauri/tauri.team.conf.json -Raw | ConvertFrom-Json
           $teamConf | Add-Member -NotePropertyName version -NotePropertyValue $version -Force
           $teamConf | ConvertTo-Json -Depth 20 | Set-Content src-tauri/tauri.team.conf.json -Encoding utf8
+          $package = Get-Content package.json -Raw | ConvertFrom-Json
+          $package.version = $version
+          $package | ConvertTo-Json -Depth 20 | Set-Content package.json -Encoding utf8
+          $cargoPath = 'src-tauri/Cargo.toml'
+          $cargo = Get-Content $cargoPath -Raw
+          $cargo = $cargo -replace '(?m)^version\s*=\s*"[^"]+"', "version = \"$version\""
+          Set-Content $cargoPath $cargo -Encoding utf8
           Write-Host "build version: $version"
 
       - name: Pnpm install and prebuild
@@ -205,7 +216,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: clash-verge-team-${{ matrix.id }}
-          archive: false
           path: target/${{ matrix.target }}/release/bundle/nsis/*.exe
           if-no-files-found: error
 
@@ -224,7 +234,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: clash-verge-team-${{ matrix.id }}
-          archive: false
           path: target/${{ matrix.target }}/release/bundle/dmg/*.dmg
           if-no-files-found: error
 
@@ -241,7 +250,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: clash-verge-team-${{ matrix.id }}
-          archive: false
           path: target/${{ matrix.target }}/release/bundle/deb/*.deb
           if-no-files-found: error
 
@@ -275,10 +283,8 @@ jobs:
         with:
           node-version: '24.19.0'
 
-      # The artifacts API serves archive:false uploads as raw bytes, which
-      # breaks gh run download / download-artifact ("not a valid zip file").
-      # The helper sniffs the zip magic per artifact and retries each
-      # download, so transient blob-fetch failures no longer kill the job.
+      # The helper extracts each artifact archive and retries transient blob
+      # failures, so the publish job receives the original installer names.
       - name: Download build artifacts
         shell: bash
         env:
@@ -302,9 +308,11 @@ jobs:
             export UPDATE_VERSION="$ver"
           else
             base=$(grep -oP '"version"\s*:\s*"\K[^"]+' src-tauri/tauri.conf.json | head -1)
-            export UPDATE_VERSION="$base-team.${{ github.run_number }}"
+            IFS=. read -r major minor patch <<< "$base"
+            export UPDATE_VERSION="$major.$minor.$((patch + 1))-team.${{ github.run_number }}"
           fi
           echo "manifest version: $UPDATE_VERSION"
+          echo "TEAM_UPDATE_VERSION=$UPDATE_VERSION" >> "$GITHUB_ENV"
           node scripts/team-update-manifest.mjs release-assets
 
       - name: Publish to rolling release
@@ -314,3 +322,17 @@ jobs:
         run: |
           gh release view team-latest >/dev/null 2>&1 || gh release create team-latest --title 'Team Latest' --notes 'Rolling Lab Clash Verge team build; updater manifest: update.json' --prerelease
           gh release upload team-latest release-assets/* --clobber
+
+      - name: Verify rolling release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view team-latest --json assets --jq '.assets[].name' > release-assets.list
+          grep -Fxq 'update.json' release-assets.list
+          grep -Fxq 'update-proxy.json' release-assets.list
+          mkdir -p release-verify
+          gh release download team-latest --pattern update.json --dir release-verify --clobber
+          jq -e --arg expected "$TEAM_UPDATE_VERSION" '.name == $expected' release-verify/update.json >/dev/null
+          echo 'rolling release assets:'
+          cat release-assets.list
