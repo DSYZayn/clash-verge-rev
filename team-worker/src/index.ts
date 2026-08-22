@@ -221,19 +221,53 @@ async function authenticate(request: Request, env: Env): Promise<JWTPayload> {
   }
 }
 
-async function fetchAccessIdentity(issuer: string, assertion: string): Promise<Record<string, unknown> | null> {
-  try {
-    const res = await fetch(`${issuer}/cdn-cgi/access/get-identity`, {
-      headers: {
-        cookie: `CF_Authorization=${assertion}`,
-        'cf-access-jwt-assertion': assertion,
-      },
-    })
-    if (res.ok) {
-      return (await res.json()) as Record<string, unknown>
+function extractHeadersProfile(request: Request): Record<string, unknown> {
+  const profile: Record<string, unknown> = {}
+  const candidateHeaderNames = [
+    'cf-access-user-name',
+    'cf-access-user-display-name',
+    'cf-access-preferred-username',
+    'cf-access-first-name',
+    'cf-access-last-name',
+    'x-user-name',
+    'x-display-name',
+    'x-preferred-username',
+  ]
+  for (const name of candidateHeaderNames) {
+    const val = request.headers.get(name)
+    if (val && val.trim()) {
+      profile[name.replace(/^cf-access-/, '').replace(/-/g, '_')] = val.trim()
     }
-  } catch (e) {
-    console.error('failed to fetch /cdn-cgi/access/get-identity:', describeError(e))
+  }
+  return profile
+}
+
+async function fetchAccessIdentity(
+  issuer: string,
+  appOrigin: string,
+  assertion: string,
+): Promise<Record<string, unknown> | null> {
+  const endpoints = [
+    `${issuer}/cdn-cgi/access/get-identity`,
+    `${appOrigin}/cdn-cgi/access/get-identity`,
+  ]
+  for (const url of endpoints) {
+    try {
+      const res = await fetch(url, {
+        headers: {
+          cookie: `CF_Authorization=${assertion}`,
+          'cf-access-jwt-assertion': assertion,
+        },
+      })
+      if (res.ok) {
+        const data = (await res.json()) as Record<string, unknown>
+        if (data && typeof data === 'object') {
+          return data
+        }
+      }
+    } catch (e) {
+      console.warn(`failed to fetch ${url}:`, describeError(e))
+    }
   }
   return null
 }
@@ -924,8 +958,12 @@ async function handleRequest(
   const assertion =
     request.headers.get('cf-access-jwt-assertion') ??
     (bearer?.toLowerCase().startsWith('bearer ') ? bearer.slice(7).trim() : null)
+  const headersProfile = extractHeadersProfile(request)
   const identity = await authenticate(request, env)
-  const identityDetails = assertion && env.TEAM_DOMAIN ? await fetchAccessIdentity(normalizedIssuer(env.TEAM_DOMAIN), assertion) : null
+  const identityDetails = assertion && env.TEAM_DOMAIN
+    ? await fetchAccessIdentity(normalizedIssuer(env.TEAM_DOMAIN), new URL(request.url).origin, assertion)
+    : null
+  const combinedDetails = { ...headersProfile, ...(identityDetails || {}) }
   try {
     await ensureSchema(env)
   } catch (error) {
@@ -934,10 +972,10 @@ async function handleRequest(
   }
   let user: UserRow | null
   try {
-    user = await getUser(env, identity)
+    user = await getUser(env, identity, combinedDetails)
     // Access is the membership gate: provision on first login instead of
     // requiring a manual D1 INSERT. users.enabled = 0 stays the kill switch.
-    user ??= await provisionUser(env, identity)
+    user ??= await provisionUser(env, identity, combinedDetails)
   } catch (error) {
     console.error('user lookup/provision failed:', describeError(error))
     return json({ error: 'User lookup or provisioning failed' }, 561)
