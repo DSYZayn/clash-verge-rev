@@ -511,6 +511,7 @@ async fn tailscale_up(key: &str) -> Result<()> {
     let path_arg = format!("--auth-key=file:{}", path.to_string_lossy());
     let result = tailscale_command()
         .arg("up")
+        .arg("--reset")
         .arg(path_arg)
         .arg("--accept-routes")
         .arg("--accept-dns=true")
@@ -821,7 +822,7 @@ async fn issue_tailscale_key(device_id: &str, hostname: &str) -> Result<Tailscal
             "deviceId": device_id,
             "hostname": hostname,
             "reusable": false,
-            "ephemeral": false,
+            "ephemeral": true,
         }),
     )
     .await?;

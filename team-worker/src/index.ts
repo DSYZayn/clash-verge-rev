@@ -764,7 +764,7 @@ async function handleDesktopTailscale(request: Request, env: Env, user: UserRow)
     const teamDeviceId = typeof body.deviceId === 'string' ? body.deviceId.slice(0, 64) : null
     const hostname = typeof body.hostname === 'string' ? body.hostname.trim().slice(0, 255) : null
     const config = tailscaleConfig(env)
-    const ephemeral = typeof body.ephemeral === 'boolean' ? body.ephemeral : false
+    const ephemeral = typeof body.ephemeral === 'boolean' ? body.ephemeral : true
     const result = await tailscaleRequest<TailscaleKeyResponse>(env, `/tailnet/${encodeURIComponent(config.tailnetId)}/keys`, 'auth_keys', [tag], {
       method: 'POST',
       body: JSON.stringify({ capabilities: { devices: { create: { reusable: false, ephemeral, preauthorized: true, tags: [tag] } } }, expirySeconds }),
@@ -847,7 +847,7 @@ async function handleAdminUsers(request: Request, env: Env, identity: JWTPayload
       : await env.TEAM_DB.prepare(`${selectUsers}
                          ORDER BY lower(COALESCE(display_name, '')), lower(COALESCE(email, ''))`).all<UserRow>()
     const users = await Promise.all(rows.results.map(async (row) => {
-      const devices = await env.TEAM_DB.prepare('SELECT node_id AS nodeId, hostname, role, tag, online, last_seen AS lastSeen, revoked_at AS revokedAt FROM tailscale_devices WHERE access_subject=?1 ORDER BY CASE WHEN revoked_at IS NOT NULL THEN 2 WHEN online = 1 THEN 0 ELSE 1 END, updated_at DESC').bind(row.access_subject).all()
+      const devices = await env.TEAM_DB.prepare('SELECT node_id AS nodeId, hostname, role, tag, online, last_seen AS lastSeen, revoked_at AS revokedAt FROM tailscale_devices WHERE access_subject=?1 AND revoked_at IS NULL ORDER BY online DESC, updated_at DESC').bind(row.access_subject).all()
       const latestKey = await env.TEAM_DB.prepare(
         `SELECT issued_at AS issuedAt, expires_at AS expiresAt, role, tag,
                 revoked_at AS revokedAt, used_at AS usedAt
@@ -908,7 +908,7 @@ async function handleAdminUsers(request: Request, env: Env, identity: JWTPayload
     const device = await env.TEAM_DB.prepare('SELECT node_id, access_subject, team_device_id, role FROM tailscale_devices WHERE node_id=?1').bind(nodeId).first<{ node_id: string; access_subject: string; team_device_id: string | null; role: 'user' | 'admin' }>()
     if (!device) return json({ error: 'Device not found' }, 404)
     await tailscaleRequest(env, `/device/${encodeURIComponent(nodeId)}`, 'devices:core', [tailscaleTag(device.role === 'admin' ? 'admin' : 'user')], { method: 'DELETE' })
-    await env.TEAM_DB.prepare('UPDATE tailscale_devices SET revoked_at=?1, online=0, updated_at=CURRENT_TIMESTAMP WHERE node_id=?2').bind(Math.floor(Date.now() / 1000), nodeId).run()
+    await env.TEAM_DB.prepare('DELETE FROM tailscale_devices WHERE node_id=?1').bind(nodeId).run()
     if (device.team_device_id) {
       await env.TEAM_DB.prepare(
         `UPDATE tailscale_key_issuances
