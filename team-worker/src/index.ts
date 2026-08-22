@@ -713,9 +713,10 @@ async function handleDesktopTailscale(request: Request, env: Env, user: UserRow)
     const teamDeviceId = typeof body.deviceId === 'string' ? body.deviceId.slice(0, 64) : null
     const hostname = typeof body.hostname === 'string' ? body.hostname.trim().slice(0, 255) : null
     const config = tailscaleConfig(env)
+    const ephemeral = typeof body.ephemeral === 'boolean' ? body.ephemeral : false
     const result = await tailscaleRequest<TailscaleKeyResponse>(env, `/tailnet/${encodeURIComponent(config.tailnetId)}/keys`, 'auth_keys', [tag], {
       method: 'POST',
-      body: JSON.stringify({ capabilities: { devices: { create: { reusable: false, ephemeral: true, preauthorized: true, tags: [tag] } } }, expirySeconds }),
+      body: JSON.stringify({ capabilities: { devices: { create: { reusable: false, ephemeral, preauthorized: true, tags: [tag] } } }, expirySeconds }),
     })
     const issuedAt = Math.floor(Date.now() / 1000)
     if (!result.id || !result.key || !result.created || !result.expires)
@@ -733,7 +734,6 @@ async function handleDesktopTailscale(request: Request, env: Env, user: UserRow)
     const body = await parseJsonBody(request)
     const nodeId = typeof body.nodeId === 'string' ? body.nodeId : ''
     if (!/^[A-Za-z0-9:_-]{4,128}$/.test(nodeId)) return json({ error: 'nodeId is required' }, 400)
-    await syncDeviceTag(env, nodeId, tag)
     const addresses = Array.isArray(body.addresses) ? body.addresses.filter((v): v is string => typeof v === 'string') : []
     const hostname = typeof body.hostname === 'string' ? body.hostname.slice(0, 255) : null
     const teamDeviceId = typeof body.deviceId === 'string' ? body.deviceId.slice(0, 64) : null

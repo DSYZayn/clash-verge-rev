@@ -821,7 +821,7 @@ async fn issue_tailscale_key(device_id: &str, hostname: &str) -> Result<Tailscal
             "deviceId": device_id,
             "hostname": hostname,
             "reusable": false,
-            "ephemeral": true,
+            "ephemeral": false,
         }),
     )
     .await?;
