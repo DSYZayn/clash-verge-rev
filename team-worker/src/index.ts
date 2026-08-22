@@ -797,6 +797,11 @@ async function handleDesktopTailscale(request: Request, env: Env, user: UserRow)
     // device, retain only the non-recoverable issuance metadata and mark the
     // newest matching issuance as used.
     if (teamDeviceId) {
+      // Mark older active nodes for the same teamDeviceId as offline
+      await env.TEAM_DB.prepare(
+        'UPDATE tailscale_devices SET online = 0, updated_at = CURRENT_TIMESTAMP WHERE access_subject = ?1 AND team_device_id = ?2 AND node_id != ?3 AND online = 1',
+      ).bind(user.access_subject, teamDeviceId, nodeId).run()
+
       await env.TEAM_DB.prepare(
         `UPDATE tailscale_key_issuances
             SET used_at = COALESCE(used_at, ?1)
@@ -842,7 +847,7 @@ async function handleAdminUsers(request: Request, env: Env, identity: JWTPayload
       : await env.TEAM_DB.prepare(`${selectUsers}
                          ORDER BY lower(COALESCE(display_name, '')), lower(COALESCE(email, ''))`).all<UserRow>()
     const users = await Promise.all(rows.results.map(async (row) => {
-      const devices = await env.TEAM_DB.prepare('SELECT node_id AS nodeId, hostname, role, tag, online, last_seen AS lastSeen, revoked_at AS revokedAt FROM tailscale_devices WHERE access_subject=?1 ORDER BY updated_at DESC').bind(row.access_subject).all()
+      const devices = await env.TEAM_DB.prepare('SELECT node_id AS nodeId, hostname, role, tag, online, last_seen AS lastSeen, revoked_at AS revokedAt FROM tailscale_devices WHERE access_subject=?1 ORDER BY CASE WHEN revoked_at IS NOT NULL THEN 2 WHEN online = 1 THEN 0 ELSE 1 END, updated_at DESC').bind(row.access_subject).all()
       const latestKey = await env.TEAM_DB.prepare(
         `SELECT issued_at AS issuedAt, expires_at AS expiresAt, role, tag,
                 revoked_at AS revokedAt, used_at AS usedAt
