@@ -916,39 +916,49 @@ async function handleAdminUsers(request: Request, env: Env, identity: JWTPayload
     }))
     return json({ users })
   }
-  const match = url.pathname.match(/^\/v1\/admin\/users\/([^/]+)\/role$/)
+  const match = url.pathname.match(/^\/v1\/admin\/users\/([^/]+)(?:\/role)?$/)
   if (request.method === 'PATCH' && match) {
     const subject = decodeURIComponent(match[1])
     const body = await parseJsonBody(request)
     const role = body.role === 'admin' ? 'admin' : body.role === 'user' ? 'user' : null
-    if (!role) return json({ error: 'role must be user or admin' }, 400)
+    const displayName = typeof body.displayName === 'string' ? body.displayName.trim() : undefined
     const row = await env.TEAM_DB.prepare('SELECT access_subject, email, display_name, team_name, enabled, quota_upload, quota_download, quota_total, quota_expire, COALESCE(tailscale_role,\'user\') AS tailscale_role FROM users WHERE access_subject=?1').bind(subject).first<UserRow>()
     if (!row) return json({ error: 'User not found' }, 404)
-    await env.TEAM_DB.prepare('UPDATE users SET tailscale_role=?1, updated_at=CURRENT_TIMESTAMP WHERE access_subject=?2').bind(role, subject).run()
-    const tag = tailscaleTag(role)
-    const devices = await env.TEAM_DB.prepare('SELECT node_id FROM tailscale_devices WHERE access_subject=?1 AND revoked_at IS NULL').bind(subject).all<{ node_id: string }>()
-    const syncErrors: string[] = []
-    for (const device of devices.results) {
-      try { await syncDeviceTag(env, device.node_id, tag) } catch (error) { syncErrors.push(error instanceof Response ? `device ${device.node_id}: Tailscale API error` : `device ${device.node_id}: sync failed`) }
+    if (role && role !== row.tailscale_role) {
+      await env.TEAM_DB.prepare('UPDATE users SET tailscale_role=?1, updated_at=CURRENT_TIMESTAMP WHERE access_subject=?2').bind(role, subject).run()
+      const tag = tailscaleTag(role)
+      const devices = await env.TEAM_DB.prepare('SELECT node_id FROM tailscale_devices WHERE access_subject=?1 AND revoked_at IS NULL').bind(subject).all<{ node_id: string }>()
+      for (const device of devices.results) {
+        try { await syncDeviceTag(env, device.node_id, tag) } catch (error) { console.error('failed to sync tag on role change:', describeError(error)) }
+      }
+      await audit(env, currentUser, `tailscale_role_changed:${role}`)
     }
-    await audit(env, currentUser, `tailscale_role_changed:${role}`)
-    return json({ ok: true, accessSubject: subject, role, tag, synced: devices.results.length - syncErrors.length, errors: syncErrors })
+    if (displayName !== undefined && displayName !== row.display_name) {
+      await env.TEAM_DB.prepare('UPDATE users SET display_name=?1, updated_at=CURRENT_TIMESTAMP WHERE access_subject=?2').bind(displayName || null, subject).run()
+      await audit(env, currentUser, `display_name_updated:${displayName}`)
+    }
+    return json({ ok: true })
   }
   const revokeMatch = url.pathname.match(/^\/v1\/admin\/devices\/([^/]+)$/)
   if (request.method === 'DELETE' && revokeMatch) {
     const nodeId = decodeURIComponent(revokeMatch[1])
     const device = await env.TEAM_DB.prepare('SELECT node_id, access_subject, team_device_id, role FROM tailscale_devices WHERE node_id=?1').bind(nodeId).first<{ node_id: string; access_subject: string; team_device_id: string | null; role: 'user' | 'admin' }>()
-    if (!device) return json({ error: 'Device not found' }, 404)
-    await tailscaleRequest(env, `/device/${encodeURIComponent(nodeId)}`, 'devices:core', [tailscaleTag(device.role === 'admin' ? 'admin' : 'user')], { method: 'DELETE' })
-    await env.TEAM_DB.prepare('DELETE FROM tailscale_devices WHERE node_id=?1').bind(nodeId).run()
-    if (device.team_device_id) {
-      await env.TEAM_DB.prepare(
-        `UPDATE tailscale_key_issuances
-            SET revoked_at = COALESCE(revoked_at, ?1)
-          WHERE access_subject = ?2 AND team_device_id = ?3
-            AND used_at IS NOT NULL`,
-      ).bind(Math.floor(Date.now() / 1000), device.access_subject, device.team_device_id).run()
+    if (device) {
+      try {
+        await tailscaleRequest(env, `/device/${encodeURIComponent(nodeId)}`, 'devices:core', [tailscaleTag(device.role === 'admin' ? 'admin' : 'user')], { method: 'DELETE' })
+      } catch (error) {
+        console.warn(`Tailscale API delete device ${nodeId} failed:`, describeError(error))
+      }
+      if (device.team_device_id) {
+        await env.TEAM_DB.prepare(
+          `UPDATE tailscale_key_issuances
+              SET revoked_at = COALESCE(revoked_at, ?1)
+            WHERE access_subject = ?2 AND team_device_id = ?3
+              AND used_at IS NOT NULL`,
+        ).bind(Math.floor(Date.now() / 1000), device.access_subject, device.team_device_id).run()
+      }
     }
+    await env.TEAM_DB.prepare('DELETE FROM tailscale_devices WHERE node_id=?1').bind(nodeId).run()
     await audit(env, currentUser, 'tailscale_device_revoked')
     return json({ ok: true, nodeId })
   }
