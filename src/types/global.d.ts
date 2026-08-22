@@ -284,6 +284,11 @@ interface ITeamStatus {
   managedProfileInstalled: boolean
   managedProfileActive?: boolean
   tailscale: ITailscaleStatus
+  /** Cloudflare One Client is optional on older team Worker/app versions. */
+  cloudflareOne?: ICloudflareOneStatus
+  /** Compatibility aliases used by transitional Worker builds. */
+  cloudflare?: ICloudflareOneStatus
+  cloudflareOneClient?: ICloudflareOneStatus
 }
 
 interface ITailscaleProfile {
@@ -296,6 +301,8 @@ interface ITailscaleProfile {
 interface ITailscaleStatus {
   installed: boolean
   version?: string
+  /** Whether the local Tailscale service/daemon is accepting CLI requests. */
+  running?: boolean
   loggedIn: boolean
   deviceName?: string
   ipv4?: string
@@ -307,6 +314,46 @@ interface ITailscaleStatus {
   role?: string
   tag?: string
   profiles?: ITailscaleProfile[]
+  netcheck?: ITailscaleNetcheck
+  netcheckAt?: number
+}
+
+interface ITailscaleNetcheck {
+  udp?: boolean
+  ipv4?: string | boolean
+  ipv6?: string | boolean
+  mappingVariesByDestIp?: boolean
+  portMapping?: string | boolean
+  hairPinning?: string | boolean
+  captivePortal?: boolean
+  nearestDerp?: string
+  derpLatency?: Record<string, number>
+  globalV6?: string | boolean
+  available?: boolean
+  error?: string
+  [key: string]: unknown
+}
+
+interface ICloudflareOneStatus {
+  installed: boolean
+  version?: string
+  accountType?: string
+  running?: boolean
+  connected: boolean
+  mode?: string
+  exitIp?: string
+  exitCountry?: string
+  exitColo?: string
+  exitRegion?: string
+  exitCity?: string
+  warpEnabled?: boolean
+  /** Location observed through the Clash TUN route. */
+  clashTunLocation?: string
+  /** Explicit comparison result from the backend, when available. */
+  locationMatch?: boolean
+  checkedAt?: number
+  lastCheckedAt?: number
+  error?: string
 }
 
 interface IVergeTestItem {

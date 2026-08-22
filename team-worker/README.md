@@ -59,6 +59,7 @@ Clash 配置发给桌面端。真实订阅 URL 只存在于 Worker Secret，客�
    | `TAILSCALE_TAILNET` | Text | Tailscale Tailnet ID；不要填写 `https://`，也不要改写或拼接域名 |
    | `TAILSCALE_OAUTH_CLIENT_ID` | Secret 3/4 | Tailscale OAuth client ID；需授权 `auth_keys`、`devices:core` 及 `tag:team-user`、`tag:team-admin` |
    | `TAILSCALE_OAUTH_CLIENT_SECRET` | Secret 4/4 | Tailscale OAuth client secret |
+   | `DEFAULT_TAILSCALE_KEY_EXPIRY_SECONDS` | Text（可选） | 桌面端 auth key 默认有效期（秒）；缺省 604800（7 天），仅接受 86400–7776000（1–90 天）区间内的值 |
 
    保存后立即生效；`keep_vars` 保证之后每次 push 重新部署时都保留这里的
    最新值。未配置时 Worker 会返回 503 提示。
@@ -141,3 +142,9 @@ login`，并把 `.env.example` 复制为 `.env` 填好（`.env` 已被 git 忽�
 最新密钥的 `issuedAt`、`expiresAt`、`role`、`tag`（以及可用时的 `used`/`revoked` 状态）；
 SHA-256 摘要仅保存在数据库中，管理员 API 和页面都不会返回或展示它。绝不会返回或持久化
 auth key 原文。需要再次使用时必须重新生成一次性 key。
+
+auth key 的有效期由 Worker 严格强制：`POST /v1/desktop/tailscale/key` 可携带可选的
+`expirySeconds`，未提供时使用 `DEFAULT_TAILSCALE_KEY_EXPIRY_SECONDS`（缺省 7 天）。
+超出 1–90 天区间的请求体会被直接拒绝（400），越界的环境变量配置会回退为默认值；
+签发后 Worker 还会校验上游返回的到期时间落在请求的有效期窗口内，确保任何情况下
+都不会签发无限期或超长有效期的 key。

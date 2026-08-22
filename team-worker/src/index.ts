@@ -644,6 +644,9 @@ async function audit(env: Env, user: UserRow, eventType: string) {
 }
 
 const ONLINE_WINDOW_SECONDS = 600
+const TAILSCALE_KEY_DEFAULT_EXPIRY_SECONDS = 7 * 86400
+const TAILSCALE_KEY_MIN_EXPIRY_SECONDS = 86400
+const TAILSCALE_KEY_MAX_EXPIRY_SECONDS = 90 * 86400
 
 const TAILSCALE_API = 'https://api.tailscale.com/api/v2'
 
@@ -794,23 +797,34 @@ async function handleDesktopTailscale(request: Request, env: Env, user: UserRow)
   }
   if (request.method === 'POST' && request.url.endsWith('/key')) {
     const body = await parseJsonBody(request)
-    const defaultExpiry = Number(env.DEFAULT_TAILSCALE_KEY_EXPIRY_SECONDS) || 7 * 86400
+    const configuredExpiry = Number(env.DEFAULT_TAILSCALE_KEY_EXPIRY_SECONDS)
+    const defaultExpiry = Number.isFinite(configuredExpiry)
+      && configuredExpiry >= TAILSCALE_KEY_MIN_EXPIRY_SECONDS
+      && configuredExpiry <= TAILSCALE_KEY_MAX_EXPIRY_SECONDS
+      ? Math.floor(configuredExpiry)
+      : TAILSCALE_KEY_DEFAULT_EXPIRY_SECONDS
     const requestedExpiry = typeof body.expirySeconds === 'number' ? body.expirySeconds : defaultExpiry
-    const expirySeconds = Math.min(Math.max(Math.floor(requestedExpiry), 86400), 180 * 24 * 60 * 60)
+    if (!Number.isFinite(requestedExpiry) || requestedExpiry < TAILSCALE_KEY_MIN_EXPIRY_SECONDS || requestedExpiry > TAILSCALE_KEY_MAX_EXPIRY_SECONDS)
+      throw new Response(`Tailscale auth key expiry must be between ${TAILSCALE_KEY_MIN_EXPIRY_SECONDS} and ${TAILSCALE_KEY_MAX_EXPIRY_SECONDS} seconds`, { status: 400 })
+    const expirySeconds = Math.floor(requestedExpiry)
     const teamDeviceId = typeof body.deviceId === 'string' ? body.deviceId.slice(0, 64) : null
     const hostname = typeof body.hostname === 'string' ? body.hostname.trim().slice(0, 255) : null
     const config = tailscaleConfig(env)
-    const ephemeral = typeof body.ephemeral === 'boolean' ? body.ephemeral : true
     const result = await tailscaleRequest<TailscaleKeyResponse>(env, `/tailnet/${encodeURIComponent(config.tailnetId)}/keys`, 'auth_keys', [tag], {
       method: 'POST',
-      body: JSON.stringify({ capabilities: { devices: { create: { reusable: false, ephemeral, preauthorized: true, tags: [tag] } } }, expirySeconds }),
+      body: JSON.stringify({ capabilities: { devices: { create: { reusable: false, ephemeral: true, preauthorized: true, tags: [tag] } } }, expirySeconds }),
     })
     const issuedAt = Math.floor(Date.now() / 1000)
     if (!result.id || !result.key || !result.created || !result.expires)
       throw new Response('Tailscale auth key response is invalid', { status: 502 })
     const expiresAt = Math.floor(Date.parse(result.expires) / 1000)
-    if (!Number.isFinite(expiresAt))
+    if (!Number.isFinite(expiresAt) || expiresAt <= issuedAt)
       throw new Response('Tailscale auth key response has an invalid expiry', { status: 502 })
+    // Strict lifetime guarantee: refuse keys whose actual expiry outlives the
+    // requested window (small tolerance for clock skew), so no unbounded or
+    // unexpectedly long-lived key is ever handed to a client.
+    if (expiresAt > issuedAt + expirySeconds + 300)
+      throw new Response('Tailscale issued an auth key that outlives the requested expiry', { status: 502 })
     await env.TEAM_DB.prepare(
       'INSERT INTO tailscale_key_issuances (id, access_subject, team_device_id, key_hash, role, tag, issued_at, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)',
     ).bind(crypto.randomUUID(), user.access_subject, teamDeviceId, await hashSecret(result.key), role, tag, issuedAt, expiresAt).run()

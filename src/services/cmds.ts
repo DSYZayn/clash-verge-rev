@@ -38,12 +38,36 @@ export async function connectTailscale() {
   return invoke<ITeamStatus>('connect_tailscale')
 }
 
+export async function startTailscale() {
+  return invoke<ITeamStatus>('start_tailscale')
+}
+
+export async function netcheckTailscale() {
+  return invoke<ITeamStatus>('netcheck_tailscale')
+}
+
 export async function refreshTailscale() {
   return invoke<ITeamStatus>('refresh_tailscale')
 }
 
 export async function logoutTailscale() {
   return invoke<ITeamStatus>('logout_tailscale')
+}
+
+export async function getCloudflareOneStatus() {
+  return invoke<ICloudflareOneStatus>('get_cloudflare_one_status')
+}
+
+export async function connectCloudflareOne() {
+  return invoke<ITeamStatus>('connect_cloudflare_one')
+}
+
+export async function refreshCloudflareOne() {
+  return invoke<ITeamStatus>('refresh_cloudflare_one')
+}
+
+export async function disconnectCloudflareOne() {
+  return invoke<ITeamStatus>('disconnect_cloudflare_one')
 }
 
 export async function activateTeamProfile() {

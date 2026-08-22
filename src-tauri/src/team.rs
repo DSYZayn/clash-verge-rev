@@ -12,6 +12,7 @@ use crate::{
 use anyhow::{Context as _, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use clash_verge_logging::{Type, logging};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_yaml_ng::Mapping;
 use sha2::{Digest as _, Sha256};
@@ -19,7 +20,7 @@ use std::{
     collections::HashMap,
     fs::OpenOptions,
     io::Write as _,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -36,7 +37,17 @@ const DEVICE_ID_FILE: &str = "team-device-id";
 const TAILSCALE_KEY_PATH: &str = "/v1/desktop/tailscale/key";
 const TAILSCALE_RECONCILE_PATH: &str = "/v1/desktop/tailscale/reconcile";
 const TAILSCALE_LOGOUT_PATH: &str = "/v1/desktop/tailscale/logout";
+const TAILSCALE_KEY_EXPIRY_SECONDS: u64 = 7 * 24 * 60 * 60;
 static BACKGROUND_STARTED: AtomicBool = AtomicBool::new(false);
+/// Country code observed immediately before WARP is connected. This is the
+/// route supplied by Clash TUN in the documented verification flow.
+static CLASH_TUN_LOCATION: once_cell::sync::Lazy<Mutex<Option<String>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(None));
+/// Last explicit `tailscale netcheck` result requested by the UI. The probe
+/// takes several seconds, so it runs on demand only and is cached here; the
+/// periodic status path re-serves this value instead of probing again.
+static NETCHECK_CACHE: once_cell::sync::Lazy<Mutex<Option<(u64, TailscaleNetcheck)>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(None));
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TeamConfig {
@@ -128,6 +139,7 @@ pub struct TeamStatus {
     pub managed_profile_installed: bool,
     pub managed_profile_active: bool,
     pub tailscale: TailscaleStatus,
+    pub cloudflare_one: CloudflareOneStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -153,6 +165,10 @@ pub struct TailscaleProfile {
 #[serde(rename_all = "camelCase")]
 pub struct TailscaleStatus {
     pub installed: bool,
+    /// Whether the local Tailscale service/daemon is available to the CLI.
+    /// This is intentionally separate from `installed`: the executable can
+    /// exist while tailscaled/the Windows service is stopped.
+    pub running: bool,
     pub version: Option<String>,
     pub logged_in: bool,
     pub device_name: Option<String>,
@@ -165,6 +181,57 @@ pub struct TailscaleStatus {
     pub role: Option<String>,
     pub tag: Option<String>,
     pub profiles: Vec<TailscaleProfile>,
+    pub netcheck: Option<TailscaleNetcheck>,
+    pub netcheck_at: Option<u64>,
+}
+
+/// Selected, presentation-friendly values returned by `tailscale netcheck`.
+///
+/// Tailscale has emitted both booleans and descriptive strings for the IPv4,
+/// IPv6 and port-mapping fields across CLI versions, so those values remain
+/// JSON scalars instead of being forced into a lossy Rust type.
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TailscaleNetcheck {
+    pub udp: Option<bool>,
+    pub ipv4: Option<serde_json::Value>,
+    pub ipv6: Option<serde_json::Value>,
+    pub mapping_varies_by_dest_ip: Option<bool>,
+    pub port_mapping: Option<serde_json::Value>,
+    pub hair_pinning: Option<serde_json::Value>,
+    pub captive_portal: Option<bool>,
+    pub nearest_derp: Option<String>,
+    pub derp_latency: HashMap<String, f64>,
+    pub global_v6: Option<serde_json::Value>,
+    pub available: bool,
+    pub error: Option<String>,
+}
+
+/// Locally observed state of the Cloudflare One Client (WARP).
+///
+/// The desktop client does not expose a stable cross-platform API. The
+/// `warp-cli` output is therefore treated as best-effort input: absence of the
+/// executable is represented by `installed = false`, while a failed trace
+/// request is retained in `error` without making the team status command fail.
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudflareOneStatus {
+    pub installed: bool,
+    pub version: Option<String>,
+    pub running: bool,
+    pub connected: bool,
+    pub mode: Option<String>,
+    pub account_type: Option<String>,
+    pub exit_ip: Option<String>,
+    pub exit_country: Option<String>,
+    pub exit_region: Option<String>,
+    pub exit_city: Option<String>,
+    pub exit_colo: Option<String>,
+    pub warp_enabled: Option<bool>,
+    pub clash_tun_location: Option<String>,
+    pub location_match: Option<bool>,
+    pub last_checked_at: u64,
+    pub error: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -397,6 +464,271 @@ async fn tailscale_output(args: &[&str]) -> Result<std::process::Output> {
         .with_context(|| format!("{} is not installed or is unavailable", tailscale_program()))
 }
 
+fn tailscale_service_command() -> Command {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("sc.exe");
+        command.args(["start", "Tailscale"]);
+        command.creation_flags(0x08000000);
+        command
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = Command::new("open");
+        command.args(["-a", "Tailscale"]);
+        command
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut command = Command::new("systemctl");
+        command.args(["start", "tailscaled"]);
+        command
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    {
+        Command::new(tailscale_program())
+    }
+}
+
+async fn start_tailscale_service() -> Result<()> {
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    bail!("starting the Tailscale service is not supported on this platform");
+
+    let output = tailscale_service_command()
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .context("failed to start the Tailscale service")?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr);
+    let detail = detail.trim();
+    if detail.is_empty() {
+        bail!("failed to start the Tailscale service (exit status {})", output.status);
+    }
+    let detail: String = detail.chars().take(300).collect();
+    bail!("failed to start the Tailscale service: {detail}");
+}
+
+fn normalized_netcheck_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .map(|character| character.to_ascii_lowercase())
+        .collect()
+}
+
+fn netcheck_json_field(root: &serde_json::Value, names: &[&str]) -> Option<serde_json::Value> {
+    let names: Vec<String> = names.iter().map(|name| normalized_netcheck_key(name)).collect();
+    let report = root.as_object().and_then(|object| {
+        object
+            .iter()
+            .find(|(key, _)| normalized_netcheck_key(key) == "report")
+            .map(|(_, value)| value)
+    });
+    for container in [Some(root), report].into_iter().flatten() {
+        let Some(object) = container.as_object() else {
+            continue;
+        };
+        if let Some((_, value)) = object
+            .iter()
+            .find(|(key, _)| names.contains(&normalized_netcheck_key(key)))
+        {
+            return (!value.is_null()).then(|| value.clone());
+        }
+    }
+    None
+}
+
+fn json_bool(value: Option<serde_json::Value>) -> Option<bool> {
+    match value? {
+        serde_json::Value::Bool(value) => Some(value),
+        serde_json::Value::String(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "yes" | "up" => Some(true),
+            "false" | "no" | "down" => Some(false),
+            _ => None,
+        },
+        serde_json::Value::Number(value) => value.as_i64().map(|value| value != 0),
+        _ => None,
+    }
+}
+
+fn scalar_from_netcheck_text(value: &str) -> serde_json::Value {
+    let value = value.trim().trim_end_matches(',').trim();
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "yes" | "up" => serde_json::Value::Bool(true),
+        "false" | "no" | "down" => serde_json::Value::Bool(false),
+        _ => serde_json::Value::String(value.to_owned()),
+    }
+}
+
+fn latency_millis(value: &str) -> Option<f64> {
+    let value = value.trim().trim_end_matches(',').trim();
+    let number = value
+        .strip_suffix("ms")
+        .map(str::trim)
+        .or_else(|| value.strip_suffix("MS").map(str::trim))
+        .and_then(|value| value.parse::<f64>().ok())
+        .map(|value| value)
+        .or_else(|| {
+            value
+                .strip_suffix('s')
+                .map(str::trim)
+                .and_then(|value| value.parse::<f64>().ok())
+                .map(|value| value * 1000.0)
+        })
+        .or_else(|| value.parse::<f64>().ok())?;
+    Some(if value.ends_with("ms") || value.ends_with("MS") {
+        number
+    } else if value.ends_with('s') {
+        number
+    } else if number.abs() < 1.0 {
+        number * 1000.0
+    } else {
+        number
+    })
+}
+
+fn latency_number_millis(value: f64) -> f64 {
+    if value.abs() >= 1_000_000.0 {
+        value / 1_000_000.0
+    } else if value.abs() < 1.0 {
+        value * 1000.0
+    } else {
+        value
+    }
+}
+
+fn parse_json_netcheck(root: &serde_json::Value) -> TailscaleNetcheck {
+    let mut result = TailscaleNetcheck {
+        available: true,
+        ..TailscaleNetcheck::default()
+    };
+    result.udp = json_bool(netcheck_json_field(root, &["UDP"]));
+    result.ipv4 = netcheck_json_field(root, &["IPv4"]);
+    result.ipv6 = netcheck_json_field(root, &["IPv6"]);
+    result.mapping_varies_by_dest_ip = json_bool(netcheck_json_field(root, &["MappingVariesByDestIP"]));
+    result.port_mapping = netcheck_json_field(root, &["PortMapping"]);
+    result.hair_pinning = netcheck_json_field(root, &["HairPinning"]);
+    result.captive_portal = json_bool(netcheck_json_field(root, &["CaptivePortal"]));
+    result.global_v6 = netcheck_json_field(root, &["GlobalV6"]);
+    result.nearest_derp = netcheck_json_field(root, &["NearestDERP"]).and_then(|value| match value {
+        serde_json::Value::String(value) => Some(value),
+        _ => None,
+    });
+    if let Some(serde_json::Value::Object(latencies)) = netcheck_json_field(root, &["DERPLatency"]) {
+        for (region, latency) in latencies {
+            let latency = match latency {
+                serde_json::Value::Number(value) => value.as_f64().map(latency_number_millis),
+                serde_json::Value::String(value) => latency_millis(&value),
+                _ => None,
+            };
+            if let Some(latency) = latency {
+                result.derp_latency.insert(region, latency);
+            }
+        }
+    }
+    result
+}
+
+fn parse_text_netcheck(text: &str) -> TailscaleNetcheck {
+    let mut result = TailscaleNetcheck {
+        available: true,
+        ..TailscaleNetcheck::default()
+    };
+    let mut in_latency = false;
+    for line in text.lines() {
+        let mut line = line.trim();
+        let had_bullet = line.starts_with('*') || line.starts_with('-');
+        line = line.trim_start_matches(&['*', '-'][..]).trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = normalized_netcheck_key(key);
+        let value = value.trim();
+        if key == "derplatency" || key == "derplatencies" {
+            in_latency = true;
+            continue;
+        }
+        if in_latency
+            && had_bullet
+            && !matches!(
+                key.as_str(),
+                "udp"
+                    | "ipv4"
+                    | "ipv6"
+                    | "mappingvariesbydestip"
+                    | "portmapping"
+                    | "hairpinning"
+                    | "captiveportal"
+                    | "nearestderp"
+                    | "globalv6"
+            )
+        {
+            if let Some(latency) = latency_millis(value.split('(').next().unwrap_or(value)) {
+                result.derp_latency.insert(key, latency);
+            }
+            continue;
+        }
+        match key.as_str() {
+            "udp" => result.udp = json_bool(Some(scalar_from_netcheck_text(value))),
+            "ipv4" => result.ipv4 = Some(scalar_from_netcheck_text(value)),
+            "ipv6" => result.ipv6 = Some(scalar_from_netcheck_text(value)),
+            "mappingvariesbydestip" => {
+                result.mapping_varies_by_dest_ip = json_bool(Some(scalar_from_netcheck_text(value)))
+            }
+            "portmapping" => result.port_mapping = Some(scalar_from_netcheck_text(value)),
+            "hairpinning" => result.hair_pinning = Some(scalar_from_netcheck_text(value)),
+            "captiveportal" => result.captive_portal = json_bool(Some(scalar_from_netcheck_text(value))),
+            "nearestderp" => result.nearest_derp = Some(value.to_owned()),
+            "globalv6" => result.global_v6 = Some(scalar_from_netcheck_text(value)),
+            _ => {}
+        }
+    }
+    result
+}
+
+async fn tailscale_netcheck_snapshot() -> TailscaleNetcheck {
+    let mut last_error = None;
+    for args in [["netcheck", "--format=json"].as_slice(), ["netcheck"].as_slice()] {
+        let output = match tailscale_output(args).await {
+            Ok(output) => output,
+            Err(error) => {
+                last_error = Some(error.to_string());
+                continue;
+            }
+        };
+        if !output.status.success() {
+            let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            last_error = Some(if detail.is_empty() {
+                format!("tailscale netcheck failed (exit status {})", output.status)
+            } else {
+                detail.chars().take(300).collect()
+            });
+            continue;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(text.trim()) {
+            return parse_json_netcheck(&value);
+        }
+        if let (Some(start), Some(end)) = (text.find('{'), text.rfind('}'))
+            && start < end
+            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&text[start..=end])
+        {
+            return parse_json_netcheck(&value);
+        }
+        return parse_text_netcheck(&text);
+    }
+    TailscaleNetcheck {
+        error: last_error,
+        ..TailscaleNetcheck::default()
+    }
+}
+
 async fn tailscale_status_snapshot() -> TailscaleStatus {
     let Ok(version) = tailscale_output(&["version"]).await else {
         return TailscaleStatus::default();
@@ -419,8 +751,10 @@ async fn tailscale_status_snapshot() -> TailscaleStatus {
     if let Ok(status) = tailscale_output(&["status", "--json"]).await
         && status.status.success()
     {
+        result.running = true;
         match serde_json::from_slice::<TailscaleStatusJson>(&status.stdout) {
             Ok(value) => {
+                result.running = value.backend_state.as_deref().is_none_or(|state| state != "Stopped");
                 result.logged_in = value.backend_state.as_deref() == Some("Running") && value.self_node.is_some();
                 if let Some(node) = value.self_node {
                     result.node_id = node.id;
@@ -443,6 +777,7 @@ async fn tailscale_status_snapshot() -> TailscaleStatus {
         && ip.status.success()
         && result.ipv4.is_none()
     {
+        result.running = true;
         result.ipv4 = String::from_utf8_lossy(&ip.stdout)
             .lines()
             .next()
@@ -487,6 +822,236 @@ async fn tailscale_profiles() -> Vec<TailscaleProfile> {
         }
     }
     profiles
+}
+
+fn warp_cli_candidates() -> Vec<PathBuf> {
+    let mut candidates = vec![PathBuf::from(if cfg!(windows) { "warp-cli.exe" } else { "warp-cli" })];
+
+    #[cfg(windows)]
+    {
+        for variable in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
+            if let Some(root) = std::env::var_os(variable) {
+                candidates.push(
+                    PathBuf::from(root)
+                        .join("Cloudflare")
+                        .join("Cloudflare WARP")
+                        .join("warp-cli.exe"),
+                );
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    candidates.push(PathBuf::from(
+        "/Applications/Cloudflare WARP.app/Contents/Resources/warp-cli",
+    ));
+
+    #[cfg(target_os = "linux")]
+    {
+        candidates.push(PathBuf::from("/usr/bin/warp-cli"));
+        candidates.push(PathBuf::from("/usr/local/bin/warp-cli"));
+    }
+
+    candidates.sort_unstable();
+    candidates.dedup();
+    candidates
+}
+
+async fn warp_cli_output(program: &Path, args: &[&str]) -> Result<std::process::Output> {
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .with_context(|| format!("{} is unavailable", program.display()))
+}
+
+async fn find_warp_cli() -> Result<(PathBuf, Option<String>)> {
+    let mut last_error = None;
+    for candidate in warp_cli_candidates() {
+        for version_args in [["--version"].as_slice(), ["version"].as_slice()] {
+            match warp_cli_output(&candidate, version_args).await {
+                Ok(output) if output.status.success() => {
+                    return Ok((candidate, parse_warp_version(&warp_cli_text(&output))));
+                }
+                Ok(output) => last_error = Some(warp_cli_text(&output)),
+                Err(error) => last_error = Some(error.to_string()),
+            }
+        }
+    }
+    let detail = last_error
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!(": {}", value.trim()))
+        .unwrap_or_default();
+    bail!("Cloudflare One Client warp-cli is not installed or unavailable{detail}")
+}
+
+fn warp_cli_text(output: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.trim().is_empty() {
+        stdout.into_owned()
+    } else {
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    }
+}
+
+fn first_value_after_label(text: &str, label: &str) -> Option<String> {
+    let label = label.to_ascii_lowercase();
+    text.lines().find_map(|line| {
+        let (key, value) = line.split_once(':').or_else(|| line.split_once('='))?;
+        if key.trim().to_ascii_lowercase() != label {
+            return None;
+        }
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    })
+}
+
+fn parse_warp_connected(text: &str) -> bool {
+    let mut connected = false;
+    for line in text.lines() {
+        let line = line.trim().to_ascii_lowercase();
+        if !line.contains("connected") && !line.contains("disconnected") {
+            continue;
+        }
+        if line.contains("disconnected") || line.contains("not connected") {
+            connected = false;
+        } else if line.contains("connected") {
+            connected = true;
+        }
+    }
+    connected
+}
+
+fn parse_warp_version(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| line.chars().any(|character| character.is_ascii_digit()))
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+}
+
+fn parse_cloudflare_trace(text: &str) -> CloudflareTrace {
+    let mut trace = CloudflareTrace::default();
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        match key.trim() {
+            "ip" => trace.ip = Some(value.to_string()),
+            "loc" => trace.country = Some(value.to_string()),
+            "colo" => trace.colo = Some(value.to_string()),
+            "warp" => {
+                trace.warp_enabled = match value.to_ascii_lowercase().as_str() {
+                    "on" | "plus" | "true" | "1" => Some(true),
+                    "off" | "false" | "0" => Some(false),
+                    _ => None,
+                };
+            }
+            _ => {}
+        }
+    }
+    trace
+}
+
+#[derive(Debug, Default)]
+struct CloudflareTrace {
+    ip: Option<String>,
+    country: Option<String>,
+    colo: Option<String>,
+    warp_enabled: Option<bool>,
+}
+
+async fn cloudflare_trace() -> Result<CloudflareTrace> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(5))
+        .build()
+        .context("failed to create Cloudflare trace client")?;
+    let response = client
+        .get("https://www.cloudflare.com/cdn-cgi/trace")
+        .header(reqwest::header::USER_AGENT, "clash-verge-rev")
+        .send()
+        .await
+        .context("Cloudflare trace request failed")?;
+    let response = response
+        .error_for_status()
+        .context("Cloudflare trace returned an error")?;
+    Ok(parse_cloudflare_trace(&response.text().await?))
+}
+
+async fn cloudflare_one_status_snapshot() -> CloudflareOneStatus {
+    let checked_at = now();
+    let mut result = CloudflareOneStatus {
+        last_checked_at: checked_at,
+        ..CloudflareOneStatus::default()
+    };
+    let Ok((program, version)) = find_warp_cli().await else {
+        return result;
+    };
+    result.installed = true;
+    result.version = version;
+
+    let status = match warp_cli_output(&program, &["status"]).await {
+        Ok(output) => {
+            let text = warp_cli_text(&output);
+            let lower = text.to_ascii_lowercase();
+            result.running = output.status.success()
+                && !lower.contains("daemon is not running")
+                && !lower.contains("service is not running");
+            if !output.status.success() && !text.trim().is_empty() {
+                result.error = Some(text.trim().to_string());
+            }
+            text
+        }
+        Err(error) => {
+            result.error = Some(error.to_string());
+            String::new()
+        }
+    };
+    result.connected = parse_warp_connected(&status);
+    result.mode = first_value_after_label(&status, "mode");
+
+    if result.running
+        && result.mode.is_none()
+        && let Ok(output) = warp_cli_output(&program, &["settings"]).await
+        && output.status.success()
+    {
+        result.mode = first_value_after_label(&warp_cli_text(&output), "mode");
+    }
+    if result.running
+        && let Ok(output) = warp_cli_output(&program, &["registration", "show"]).await
+        && output.status.success()
+    {
+        result.account_type = first_value_after_label(&warp_cli_text(&output), "account type");
+    }
+
+    if !result.running || !result.connected {
+        return result;
+    }
+    match cloudflare_trace().await {
+        Ok(trace) => {
+            result.exit_ip = trace.ip;
+            result.exit_country = trace.country;
+            result.exit_colo = trace.colo;
+            result.warp_enabled = trace.warp_enabled;
+            result.clash_tun_location = CLASH_TUN_LOCATION.lock().clone();
+            result.location_match = result
+                .clash_tun_location
+                .as_ref()
+                .zip(result.exit_country.as_ref())
+                .map(|(clash, exit)| clash.eq_ignore_ascii_case(exit));
+        }
+        Err(error) => result.error = Some(error.to_string()),
+    }
+    result
 }
 
 fn create_tailscale_key_file(key: &str) -> Result<PathBuf> {
@@ -795,6 +1360,11 @@ pub async fn status() -> Result<TeamStatus> {
     let managed_profile_installed = latest.get_item(MANAGED_PROFILE_UID).is_ok();
     let managed_profile_active = latest.is_current_profile_index(&MANAGED_PROFILE_UID.into());
     let mut tailscale = tailscale_status_snapshot().await;
+    if let Some((checked_at, netcheck)) = NETCHECK_CACHE.lock().clone() {
+        tailscale.netcheck = Some(netcheck);
+        tailscale.netcheck_at = Some(checked_at);
+    }
+    let cloudflare_one = cloudflare_one_status_snapshot().await;
     if let Some(info) = session.as_ref().and_then(|value| value.tailscale.as_ref()) {
         if tailscale.node_id.is_none() {
             tailscale.node_id = info.node_id.clone();
@@ -812,7 +1382,92 @@ pub async fn status() -> Result<TeamStatus> {
         managed_profile_installed,
         managed_profile_active,
         tailscale,
+        cloudflare_one,
     })
+}
+
+/// Start the locally installed Tailscale service without changing its login
+/// state. Authentication remains an explicit operation in
+/// `tailscale_connect`.
+pub async fn tailscale_start() -> Result<TeamStatus> {
+    let snapshot = tailscale_status_snapshot().await;
+    if !snapshot.installed {
+        bail!("Tailscale CLI is not installed or is unavailable");
+    }
+    if snapshot.running {
+        return status().await;
+    }
+    start_tailscale_service().await?;
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if tailscale_status_snapshot().await.running {
+            return status().await;
+        }
+    }
+    bail!("Tailscale service did not become available after start");
+}
+
+/// Run `tailscale netcheck` on demand and cache the result for subsequent
+/// status reads. The probe takes several seconds (it contacts the DERP
+/// regions), so it never runs on the periodic status polling path.
+pub async fn tailscale_netcheck() -> Result<TeamStatus> {
+    let snapshot = tailscale_status_snapshot().await;
+    if !snapshot.installed {
+        bail!("Tailscale CLI is not installed or is unavailable");
+    }
+    if !snapshot.running {
+        bail!("Tailscale service is not running");
+    }
+    let report = tailscale_netcheck_snapshot().await;
+    *NETCHECK_CACHE.lock() = Some((now(), report));
+    status().await
+}
+
+/// Probe the Cloudflare One Client without requiring a team login.
+pub async fn cloudflare_one_status() -> Result<CloudflareOneStatus> {
+    Ok(cloudflare_one_status_snapshot().await)
+}
+
+async fn cloudflare_one_command(action: &str) -> Result<CloudflareOneStatus> {
+    let (program, _) = find_warp_cli().await?;
+
+    if action == "connect" {
+        // Record the route selected by Clash TUN before WARP takes over. The
+        // next status snapshot compares Cloudflare's exit country with it.
+        let current_status = warp_cli_output(&program, &["status"]).await;
+        let currently_connected = current_status
+            .as_ref()
+            .is_ok_and(|output| output.status.success() && parse_warp_connected(&warp_cli_text(output)));
+        if !currently_connected && let Ok(trace) = cloudflare_trace().await {
+            *CLASH_TUN_LOCATION.lock() = trace.country;
+        }
+    }
+
+    let output = warp_cli_output(&program, &[action]).await?;
+    if !output.status.success() {
+        let detail = warp_cli_text(&output);
+        let detail = detail.trim();
+        if detail.is_empty() {
+            bail!("warp-cli {action} failed (exit status {})", output.status);
+        }
+        bail!("warp-cli {action} failed: {detail}");
+    }
+    Ok(cloudflare_one_status_snapshot().await)
+}
+
+pub async fn connect_cloudflare_one() -> Result<TeamStatus> {
+    cloudflare_one_command("connect").await?;
+    status().await
+}
+
+pub async fn refresh_cloudflare_one() -> Result<TeamStatus> {
+    status().await
+}
+
+pub async fn disconnect_cloudflare_one() -> Result<TeamStatus> {
+    cloudflare_one_command("disconnect").await?;
+    *CLASH_TUN_LOCATION.lock() = None;
+    status().await
 }
 
 async fn issue_tailscale_key(device_id: &str, hostname: &str) -> Result<TailscaleKeyResponse> {
@@ -823,12 +1478,19 @@ async fn issue_tailscale_key(device_id: &str, hostname: &str) -> Result<Tailscal
             "hostname": hostname,
             "reusable": false,
             "ephemeral": true,
+            "expirySeconds": TAILSCALE_KEY_EXPIRY_SECONDS,
         }),
     )
     .await?;
     let issued = response.json::<TailscaleKeyResponse>().await?;
     if issued.key.trim().is_empty() {
         bail!("Worker returned an empty Tailscale authorization key")
+    }
+    let expires_at = issued
+        .expires_at
+        .context("Worker returned a Tailscale authorization key without an expiration")?;
+    if expires_at <= now() {
+        bail!("Worker returned an already expired Tailscale authorization key")
     }
     Ok(issued)
 }
