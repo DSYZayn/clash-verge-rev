@@ -40,3 +40,8 @@ pub async fn refresh_tailscale() -> CmdResult<team::TeamStatus> {
 pub async fn logout_tailscale() -> CmdResult<team::TeamStatus> {
     team::tailscale_logout().await.stringify_err()
 }
+
+#[tauri::command]
+pub async fn switch_tailscale_account(account: String) -> CmdResult<team::TeamStatus> {
+    team::tailscale_switch_account(&account).await.stringify_err()
+}

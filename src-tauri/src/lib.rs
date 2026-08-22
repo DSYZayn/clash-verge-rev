@@ -191,6 +191,7 @@ mod app_init {
             cmd::connect_tailscale,
             cmd::refresh_tailscale,
             cmd::logout_tailscale,
+            cmd::switch_tailscale_account,
             cmd::enhance_profiles,
             cmd::patch_profiles_config,
             cmd::view_profile,

@@ -241,6 +241,37 @@ const TeamPage = () => {
               </>
             )}
 
+            {tailscale?.installed && tailscale.profiles && tailscale.profiles.length > 1 && (
+              <>
+                <Divider sx={{ my: 2 }} />
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                  本地 Tailscale 账号切换：
+                </Typography>
+                <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap' }}>
+                  {tailscale.profiles.map((p) => (
+                    <Chip
+                      key={p.id}
+                      label={`${p.name || p.id}${p.active ? ' (当前)' : ''}`}
+                      color={p.active ? 'primary' : 'default'}
+                      variant={p.active ? 'filled' : 'outlined'}
+                      onClick={
+                        p.active
+                          ? undefined
+                          : () =>
+                              run(
+                                'tailscale-switch',
+                                () => switchTailscaleAccount(p.id),
+                                '切换 Tailscale 账号失败：',
+                              )
+                      }
+                      disabled={Boolean(action)}
+                      clickable={!p.active}
+                    />
+                  ))}
+                </Stack>
+              </>
+            )}
+
             <Divider sx={{ my: 2 }} />
             <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap' }}>
               {!tailscale?.loggedIn ? (

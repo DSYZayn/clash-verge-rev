@@ -221,8 +221,25 @@ async function authenticate(request: Request, env: Env): Promise<JWTPayload> {
   }
 }
 
-function extractDisplayName(identity: JWTPayload): string | null {
-  const raw = identity as Record<string, unknown>
+async function fetchAccessIdentity(issuer: string, assertion: string): Promise<Record<string, unknown> | null> {
+  try {
+    const res = await fetch(`${issuer}/cdn-cgi/access/get-identity`, {
+      headers: {
+        cookie: `CF_Authorization=${assertion}`,
+        'cf-access-jwt-assertion': assertion,
+      },
+    })
+    if (res.ok) {
+      return (await res.json()) as Record<string, unknown>
+    }
+  } catch (e) {
+    console.error('failed to fetch /cdn-cgi/access/get-identity:', describeError(e))
+  }
+  return null
+}
+
+function extractDisplayName(identity: JWTPayload, identityDetails?: Record<string, unknown> | null): string | null {
+  const raw = { ...(identityDetails || {}), ...(identity as Record<string, unknown> || {}) }
   const email = typeof raw.email === 'string' ? raw.email.trim() : null
   const isEmail = (s: string) => Boolean(email && s.toLowerCase() === email.toLowerCase())
 
@@ -249,8 +266,8 @@ function extractDisplayName(identity: JWTPayload): string | null {
     }
   }
 
-  // Check nested claims (custom_attributes, custom_claims, user_metadata, profile)
-  const nestedObjects = [raw.custom_attributes, raw.custom_claims, raw.user_metadata, raw.profile]
+  // Check nested claims (custom_attributes, custom_claims, user_metadata, profile, custom, idp)
+  const nestedObjects = [raw.custom_attributes, raw.custom_claims, raw.user_metadata, raw.profile, raw.custom, raw.idp]
   for (const obj of nestedObjects) {
     if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
       const nested = obj as Record<string, unknown>
@@ -298,6 +315,7 @@ function extractDisplayName(identity: JWTPayload): string | null {
 async function getUser(
   env: Env,
   identity: JWTPayload,
+  identityDetails?: Record<string, unknown> | null,
 ): Promise<UserRow | null> {
   const subject = identity.sub
   const email = typeof identity.email === 'string' ? identity.email.trim() : undefined
@@ -336,7 +354,7 @@ async function getUser(
 
     // Auto-sync display name and email if a better/updated name is present in SSO identity
     const currentName = user.display_name?.trim() ?? ''
-    const ssoDisplayName = extractDisplayName(identity)
+    const ssoDisplayName = extractDisplayName(identity, identityDetails)
     const shouldUpdateName =
       ssoDisplayName &&
       ssoDisplayName !== currentName &&
@@ -371,11 +389,12 @@ async function getUser(
 async function provisionUser(
   env: Env,
   identity: JWTPayload,
+  identityDetails?: Record<string, unknown> | null,
 ): Promise<UserRow | null> {
   const subject = identity.sub
   if (!subject) return null
   const email = typeof identity.email === 'string' ? identity.email.trim() : null
-  const displayName = extractDisplayName(identity)
+  const displayName = extractDisplayName(identity, identityDetails)
   await env.TEAM_DB.prepare(
     `INSERT INTO users (access_subject, email, display_name, enabled)
      VALUES (?1, ?2, ?3, 1)
@@ -383,7 +402,7 @@ async function provisionUser(
   )
     .bind(subject, email, displayName)
     .run()
-  const user = await getUser(env, identity)
+  const user = await getUser(env, identity, identityDetails)
   if (user) await audit(env, user, 'user_provisioned')
   return user
 }
@@ -884,7 +903,12 @@ async function handleRequest(
   if (request.method === 'PUT' && url.pathname === '/v1/admin/resource')
     return handleAdminResourcePut(request, env)
 
+  const bearer = request.headers.get('authorization')
+  const assertion =
+    request.headers.get('cf-access-jwt-assertion') ??
+    (bearer?.toLowerCase().startsWith('bearer ') ? bearer.slice(7).trim() : null)
   const identity = await authenticate(request, env)
+  const identityDetails = assertion && env.TEAM_DOMAIN ? await fetchAccessIdentity(normalizedIssuer(env.TEAM_DOMAIN), assertion) : null
   try {
     await ensureSchema(env)
   } catch (error) {

@@ -140,6 +140,15 @@ pub struct TailscaleInfo {
     pub tag: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TailscaleProfile {
+    pub id: String,
+    pub name: String,
+    pub active: bool,
+    pub tailnet: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct TailscaleStatus {
@@ -155,6 +164,7 @@ pub struct TailscaleStatus {
     pub key_expires_at: Option<u64>,
     pub role: Option<String>,
     pub tag: Option<String>,
+    pub profiles: Vec<TailscaleProfile>,
 }
 
 #[derive(Deserialize)]
@@ -445,7 +455,38 @@ async fn tailscale_status_snapshot() -> TailscaleStatus {
             result.addresses.insert(0, ipv4.clone());
         }
     }
+    result.profiles = tailscale_profiles().await;
     result
+}
+
+async fn tailscale_profiles() -> Vec<TailscaleProfile> {
+    let Ok(output) = tailscale_output(&["switch", "--list"]).await else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut profiles = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("ID") || line.starts_with("---") {
+            continue;
+        }
+        let is_active = line.ends_with('*') || line.contains(" *");
+        let cleaned = line.trim_end_matches('*').trim();
+        let parts: Vec<&str> = cleaned.split_whitespace().collect();
+        if let Some(first) = parts.first() {
+            let name = parts.get(1).copied().unwrap_or(first);
+            profiles.push(TailscaleProfile {
+                id: (*first).to_string(),
+                name: name.to_string(),
+                active: is_active,
+                tailnet: parts.get(2).map(|s| (*s).to_string()),
+            });
+        }
+    }
+    profiles
 }
 
 fn create_tailscale_key_file(key: &str) -> Result<PathBuf> {
@@ -850,6 +891,19 @@ pub async fn tailscale_connect() -> Result<TeamStatus> {
         }
     }
     Err(up_error.unwrap_or_else(|| anyhow::anyhow!("tailscale up failed")))
+}
+
+pub async fn tailscale_switch_account(account: &str) -> Result<TeamStatus> {
+    let output = tailscale_output(&["switch", account]).await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        if detail.is_empty() {
+            bail!("tailscale switch failed (exit status {})", output.status);
+        }
+        bail!("tailscale switch failed: {detail}");
+    }
+    status().await
 }
 
 pub async fn tailscale_refresh() -> Result<TeamStatus> {

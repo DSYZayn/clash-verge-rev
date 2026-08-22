@@ -286,6 +286,13 @@ interface ITeamStatus {
   tailscale: ITailscaleStatus
 }
 
+interface ITailscaleProfile {
+  id: string
+  name: string
+  active: boolean
+  tailnet?: string
+}
+
 interface ITailscaleStatus {
   installed: boolean
   version?: string
@@ -299,6 +306,7 @@ interface ITailscaleStatus {
   keyExpiresAt?: number
   role?: string
   tag?: string
+  profiles?: ITailscaleProfile[]
 }
 
 interface IVergeTestItem {
