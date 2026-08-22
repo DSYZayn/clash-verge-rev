@@ -272,17 +272,27 @@ async function fetchAccessIdentity(
   return null
 }
 
+function getStringValue(val: unknown): string {
+  if (typeof val === 'string') return val.trim()
+  if (Array.isArray(val) && val.length > 0) {
+    const first = val[0]
+    if (typeof first === 'string') return first.trim()
+  }
+  return ''
+}
+
 function extractDisplayName(identity: JWTPayload, identityDetails?: Record<string, unknown> | null): string | null {
   const raw = { ...(identityDetails || {}), ...(identity as Record<string, unknown> || {}) }
-  const email = typeof raw.email === 'string' ? raw.email.trim() : null
-  const isEmail = (s: string) => Boolean(email && s.toLowerCase() === email.toLowerCase())
+  const email = getStringValue(raw.email)
+  const isEmail = (s: string) => Boolean(email && s.toLowerCase() === email.toLowerCase()) || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s)
 
-  // Priority list of direct claim names (Casdoor, standard OIDC, Cloudflare Access)
   const candidateKeys = [
     'displayName',
     'display_name',
+    'displayname',
     'preferred_username',
     'preferredUsername',
+    'preferredusername',
     'username',
     'user_name',
     'name',
@@ -290,77 +300,99 @@ function extractDisplayName(identity: JWTPayload, identityDetails?: Record<strin
     'nickName',
   ]
 
-  for (const key of candidateKeys) {
-    const val = raw[key]
-    if (typeof val === 'string') {
-      const trimmed = val.trim()
-      if (trimmed && !isEmail(trimmed)) {
-        return trimmed
+  function findInObject(obj: unknown): string {
+    if (!obj || typeof obj !== 'object') return ''
+    const dict = obj as Record<string, unknown>
+    // 1. Direct candidate keys
+    for (const key of candidateKeys) {
+      const val = getStringValue(dict[key])
+      if (val && !isEmail(val)) {
+        return val
       }
     }
-  }
-
-  // Check nested claims (custom_attributes, custom_claims, user_metadata, profile, custom, idp, raw_attributes)
-  const nestedObjects = [
-    raw.custom_attributes,
-    raw.custom_claims,
-    raw.user_metadata,
-    raw.profile,
-    raw.custom,
-    raw.idp,
-    raw.raw_attributes,
-    raw.claims,
-  ]
-  for (const obj of nestedObjects) {
-    if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
-      const nested = obj as Record<string, unknown>
-      for (const key of candidateKeys) {
-        const val = nested[key]
-        if (typeof val === 'string') {
-          const trimmed = val.trim()
-          if (trimmed && !isEmail(trimmed)) {
-            return trimmed
+    // 2. Case-insensitive key search
+    for (const k of Object.keys(dict)) {
+      const lowerK = k.toLowerCase()
+      for (const candidate of candidateKeys) {
+        if (
+          lowerK === candidate.toLowerCase() ||
+          lowerK.endsWith('/' + candidate.toLowerCase()) ||
+          lowerK.endsWith(':' + candidate.toLowerCase())
+        ) {
+          const val = getStringValue(dict[k])
+          if (val && !isEmail(val)) {
+            return val
           }
         }
       }
     }
+    return ''
   }
 
-  // Handle first_name and last_name combinations (Casdoor mapping / OIDC)
-  const givenName =
-    typeof raw.firstName === 'string'
-      ? raw.firstName.trim()
-      : typeof raw.first_name === 'string'
-        ? raw.first_name.trim()
-        : typeof raw.given_name === 'string'
-          ? raw.given_name.trim()
-          : typeof raw.givenName === 'string'
-            ? raw.givenName.trim()
-            : ''
-  const familyName =
-    typeof raw.lastName === 'string'
-      ? raw.lastName.trim()
-      : typeof raw.last_name === 'string'
-        ? raw.last_name.trim()
-        : typeof raw.family_name === 'string'
-          ? raw.family_name.trim()
-          : typeof raw.familyName === 'string'
-            ? raw.familyName.trim()
-            : ''
+  // 1. Check root
+  let name = findInObject(raw)
+  if (name) return name
 
-  if (givenName && familyName) {
-    const hasCJK = /[\u4e00-\u9fa5]/.test(givenName) || /[\u4e00-\u9fa5]/.test(familyName)
-    return hasCJK ? `${familyName}${givenName}` : `${givenName} ${familyName}`
+  // 2. Check nested claim objects (Cloudflare Access custom claims, SAML attributes, IdP claims)
+  const nestedKeys = [
+    'custom',
+    'custom_attributes',
+    'custom_claims',
+    'user_metadata',
+    'app_metadata',
+    'profile',
+    'idp',
+    'raw_attributes',
+    'claims',
+    'user',
+    'identity_provider',
+  ]
+
+  for (const nk of nestedKeys) {
+    const nested = raw[nk]
+    if (nested && typeof nested === 'object') {
+      name = findInObject(nested)
+      if (name) return name
+    }
   }
-  if (givenName && !isEmail(givenName)) return givenName
-  if (familyName && !isEmail(familyName)) return familyName
+
+  // 3. Check first_name + last_name combinations
+  function getCompositeName(obj: unknown): string {
+    if (!obj || typeof obj !== 'object') return ''
+    const dict = obj as Record<string, unknown>
+    const given =
+      getStringValue(dict.firstName) ||
+      getStringValue(dict.first_name) ||
+      getStringValue(dict.given_name) ||
+      getStringValue(dict.givenName)
+    const family =
+      getStringValue(dict.lastName) ||
+      getStringValue(dict.last_name) ||
+      getStringValue(dict.family_name) ||
+      getStringValue(dict.familyName)
+
+    if (given && family) {
+      const hasCJK = /[\u4e00-\u9fa5]/.test(given) || /[\u4e00-\u9fa5]/.test(family)
+      return hasCJK ? `${family}${given}` : `${given} ${family}`
+    }
+    if (given && !isEmail(given)) return given
+    if (family && !isEmail(family)) return family
+    return ''
+  }
+
+  name = getCompositeName(raw)
+  if (name) return name
+
+  for (const nk of nestedKeys) {
+    name = getCompositeName(raw[nk])
+    if (name) return name
+  }
 
   // Fallback to name if present even if it looks like email
-  if (typeof raw.name === 'string' && raw.name.trim()) {
-    return raw.name.trim()
-  }
+  const rawName = getStringValue(raw.name)
+  if (rawName) return rawName
 
-  return email
+  return email || null
 }
 
 async function getUser(
