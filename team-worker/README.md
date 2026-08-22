@@ -148,3 +148,9 @@ auth key 的有效期由 Worker 严格强制：`POST /v1/desktop/tailscale/key` 
 超出 1–90 天区间的请求体会被直接拒绝（400），越界的环境变量配置会回退为默认值；
 签发后 Worker 还会校验上游返回的到期时间落在请求的有效期窗口内，确保任何情况下
 都不会签发无限期或超长有效期的 key。
+
+设备注册完成后，Worker 还会调用 Tailscale 的设备 key 接口，将
+`keyExpiryDisabled` 强制设为 `false`，并校验设备返回了未来的 `expires` 时间。
+这与 auth key 的 `expirySeconds` 是两套生命周期；如果 Tailnet 的
+`devicesKeyDurationDays` 未配置为有限值，设备注册会被拒绝，需要先在 Tailscale
+管理后台设置 1–180 天的设备密钥有效期。

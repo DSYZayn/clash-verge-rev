@@ -657,6 +657,11 @@ interface TailscaleKeyResponse {
   expires: string
 }
 
+interface TailscaleDeviceKeyState {
+  keyExpiryDisabled?: boolean
+  expires?: string
+}
+
 type TailscaleScope = 'auth_keys' | 'devices:core'
 
 function tailscaleConfig(env: Env) {
@@ -770,6 +775,23 @@ function tailscaleTag(role: 'user' | 'admin') {
   return role === 'admin' ? 'tag:team-admin' : 'tag:team-user'
 }
 
+async function ensureTailscaleDeviceKeyExpiry(env: Env, nodeId: string, tag: string) {
+  const encodedNodeId = encodeURIComponent(nodeId)
+  await tailscaleRequest(env, `/device/${encodedNodeId}/key`, 'devices:core', [tag], {
+    method: 'POST',
+    body: JSON.stringify({ keyExpiryDisabled: false }),
+  })
+  const device = await tailscaleRequest<TailscaleDeviceKeyState>(
+    env,
+    `/device/${encodedNodeId}?fields=default`,
+    'devices:core',
+    [tag],
+  )
+  const expiresAt = device.expires ? Date.parse(device.expires) : NaN
+  if (device.keyExpiryDisabled || !Number.isFinite(expiresAt) || expiresAt <= Date.now())
+    throw new Response('Tailscale device key expiry is disabled or unavailable; configure a finite Tailnet key duration', { status: 502 })
+}
+
 async function hashSecret(value: string) {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
@@ -838,6 +860,7 @@ async function handleDesktopTailscale(request: Request, env: Env, user: UserRow)
     const addresses = Array.isArray(body.addresses) ? body.addresses.filter((v): v is string => typeof v === 'string') : []
     const hostname = typeof body.hostname === 'string' ? body.hostname.slice(0, 255) : null
     const teamDeviceId = typeof body.deviceId === 'string' ? body.deviceId.slice(0, 64) : null
+    await ensureTailscaleDeviceKeyExpiry(env, nodeId, tag)
     await env.TEAM_DB.prepare(
       `INSERT INTO tailscale_devices (node_id, access_subject, team_device_id, hostname, ipv4, ipv6, role, tag, online, last_seen)
        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9)
@@ -1067,12 +1090,20 @@ async function handleAdminUsers(request: Request, env: Env, identity: JWTPayload
         console.warn(`Tailscale API delete device ${nodeId} failed:`, describeError(error))
       }
       if (device.team_device_id) {
-        await env.TEAM_DB.prepare(
-          `UPDATE tailscale_key_issuances
-              SET revoked_at = COALESCE(revoked_at, ?1)
-            WHERE access_subject = ?2 AND team_device_id = ?3
-              AND used_at IS NOT NULL`,
-        ).bind(Math.floor(Date.now() / 1000), device.access_subject, device.team_device_id).run()
+        const remainingDevice = await env.TEAM_DB.prepare(
+          `SELECT 1 FROM tailscale_devices
+            WHERE access_subject = ?1 AND team_device_id = ?2
+              AND node_id != ?3 AND revoked_at IS NULL
+            LIMIT 1`,
+        ).bind(device.access_subject, device.team_device_id, nodeId).first()
+        if (!remainingDevice) {
+          await env.TEAM_DB.prepare(
+            `UPDATE tailscale_key_issuances
+                SET revoked_at = COALESCE(revoked_at, ?1)
+              WHERE access_subject = ?2 AND team_device_id = ?3
+                AND used_at IS NOT NULL`,
+          ).bind(Math.floor(Date.now() / 1000), device.access_subject, device.team_device_id).run()
+        }
       }
     }
     await env.TEAM_DB.prepare('DELETE FROM tailscale_devices WHERE node_id=?1').bind(nodeId).run()
