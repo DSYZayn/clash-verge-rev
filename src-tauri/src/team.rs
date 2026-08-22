@@ -18,7 +18,7 @@ use sha2::{Digest as _, Sha256};
 use std::{
     collections::HashMap,
     fs::OpenOptions,
-    io::Write,
+    io::Write as _,
     path::PathBuf,
     process::Stdio,
     sync::atomic::{AtomicBool, Ordering},
@@ -61,7 +61,7 @@ pub struct TeamConfig {
     pub sync_interval_minutes: u64,
 }
 
-fn default_scopes() -> Vec<String> {
+const fn default_scopes() -> Vec<String> {
     Vec::new()
 }
 fn default_account_path() -> String {
@@ -185,9 +185,80 @@ struct TailscaleStatusJson {
     self_node: Option<TailscaleNode>,
 }
 
+fn deserialize_node_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct NodeIdVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for NodeIdVisitor {
+        type Value = Option<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a string, integer, or null")
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+
+        fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            self.visit_str(&v)
+        }
+
+        fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserializer.deserialize_any(Self)
+        }
+    }
+
+    deserializer.deserialize_option(NodeIdVisitor)
+}
+
 #[derive(Debug, Deserialize)]
 struct TailscaleNode {
-    #[serde(rename = "ID", alias = "NodeID")]
+    #[serde(rename = "ID", default, deserialize_with = "deserialize_node_id")]
     id: Option<String>,
     #[serde(rename = "HostName")]
     hostname: Option<String>,
@@ -294,7 +365,7 @@ fn save_session(session: &TeamSession) -> Result<()> {
     Ok(())
 }
 
-fn tailscale_program() -> &'static str {
+const fn tailscale_program() -> &'static str {
     if cfg!(windows) { "tailscale.exe" } else { "tailscale" }
 }
 
@@ -337,19 +408,25 @@ async fn tailscale_status_snapshot() -> TailscaleStatus {
 
     if let Ok(status) = tailscale_output(&["status", "--json"]).await
         && status.status.success()
-        && let Ok(value) = serde_json::from_slice::<TailscaleStatusJson>(&status.stdout)
     {
-        result.logged_in = value.backend_state.as_deref() == Some("Running") && value.self_node.is_some();
-        if let Some(node) = value.self_node {
-            result.node_id = node.id;
-            result.device_name = node.hostname.or(node.dns_name);
-            result.addresses = node.ips;
-            result.ipv4 = result
-                .addresses
-                .iter()
-                .find(|ip| ip.parse::<std::net::Ipv4Addr>().is_ok())
-                .cloned();
-            result.online = node.online.unwrap_or(result.logged_in);
+        match serde_json::from_slice::<TailscaleStatusJson>(&status.stdout) {
+            Ok(value) => {
+                result.logged_in = value.backend_state.as_deref() == Some("Running") && value.self_node.is_some();
+                if let Some(node) = value.self_node {
+                    result.node_id = node.id;
+                    result.device_name = node.hostname.or(node.dns_name);
+                    result.addresses = node.ips;
+                    result.ipv4 = result
+                        .addresses
+                        .iter()
+                        .find(|ip| ip.parse::<std::net::Ipv4Addr>().is_ok())
+                        .cloned();
+                    result.online = node.online.unwrap_or(result.logged_in);
+                }
+            }
+            Err(error) => {
+                logging!(debug, Type::Config, "failed to parse tailscale status JSON: {error}");
+            }
         }
     }
     if let Ok(ip) = tailscale_output(&["ip", "-4"]).await
@@ -441,10 +518,7 @@ async fn team_post(path: &str, body: serde_json::Value) -> Result<reqwest::Respo
     checked_response(response).await
 }
 
-async fn tailscale_reconcile(
-    device_id: &str,
-    snapshot: &TailscaleStatus,
-) -> Result<TailscaleReconcileResponse> {
+async fn tailscale_reconcile(device_id: &str, snapshot: &TailscaleStatus) -> Result<TailscaleReconcileResponse> {
     let node_id = snapshot
         .node_id
         .as_deref()
@@ -468,10 +542,7 @@ async fn tailscale_reconcile(
     .context("invalid Tailscale reconcile response")
 }
 
-async fn save_tailscale_reconcile(
-    response: TailscaleReconcileResponse,
-    node_id: Option<String>,
-) -> Result<()> {
+async fn save_tailscale_reconcile(response: TailscaleReconcileResponse, node_id: Option<String>) -> Result<()> {
     let mut session = usable_session().await?;
     session.tailscale = Some(TailscaleInfo {
         node_id,
@@ -631,9 +702,7 @@ pub async fn login() -> Result<TeamStatus> {
         .form(&token_form)
         .send()
         .await?;
-    let token = checked_response(token).await?
-        .json::<OAuthTokenResponse>()
-        .await?;
+    let token = checked_response(token).await?.json::<OAuthTokenResponse>().await?;
     save_session(&TeamSession {
         access_token: token.access_token,
         refresh_token: token.refresh_token,
@@ -666,9 +735,7 @@ async fn usable_session() -> Result<TeamSession> {
         .form(&token_form)
         .send()
         .await?;
-    let token = checked_response(token).await?
-        .json::<OAuthTokenResponse>()
-        .await?;
+    let token = checked_response(token).await?.json::<OAuthTokenResponse>().await?;
     session.access_token = token.access_token;
     session.refresh_token = token.refresh_token.or(Some(refresh_token));
     session.token_type = token.token_type;
@@ -859,10 +926,7 @@ pub async fn refresh_account() -> Result<TeamStatus> {
         .header("x-team-device", device_id()?)
         .send()
         .await?;
-    let mut account = checked_response(account_response)
-        .await?
-        .json::<TeamAccount>()
-        .await?;
+    let mut account = checked_response(account_response).await?.json::<TeamAccount>().await?;
     if account.quota.is_none() {
         account.quota = session.account.as_ref().and_then(|previous| previous.quota.clone());
     }
@@ -988,6 +1052,7 @@ pub async fn sync_managed_profile() -> Result<TeamStatus> {
     status().await
 }
 
+#[allow(clippy::unused_async)]
 pub async fn init_background_sync() {
     if BACKGROUND_STARTED.swap(true, Ordering::SeqCst) {
         return;

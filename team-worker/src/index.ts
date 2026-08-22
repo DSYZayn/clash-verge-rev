@@ -32,6 +32,7 @@ interface Env {
   TAILSCALE_OAUTH_CLIENT_ID?: string
   TAILSCALE_OAUTH_CLIENT_SECRET?: string
   ADMIN_EMAIL?: string
+  DEFAULT_TAILSCALE_KEY_EXPIRY_SECONDS?: string
 }
 
 interface UserRow {
@@ -588,8 +589,9 @@ async function handleDesktopTailscale(request: Request, env: Env, user: UserRow)
   }
   if (request.method === 'POST' && request.url.endsWith('/key')) {
     const body = await parseJsonBody(request)
-    const requestedExpiry = typeof body.expirySeconds === 'number' ? body.expirySeconds : 86400
-    const expirySeconds = Math.min(Math.max(Math.floor(requestedExpiry), 300), 90 * 24 * 60 * 60)
+    const defaultExpiry = Number(env.DEFAULT_TAILSCALE_KEY_EXPIRY_SECONDS) || 7 * 86400
+    const requestedExpiry = typeof body.expirySeconds === 'number' ? body.expirySeconds : defaultExpiry
+    const expirySeconds = Math.min(Math.max(Math.floor(requestedExpiry), 86400), 180 * 24 * 60 * 60)
     const teamDeviceId = typeof body.deviceId === 'string' ? body.deviceId.slice(0, 64) : null
     const hostname = typeof body.hostname === 'string' ? body.hostname.trim().slice(0, 255) : null
     const config = tailscaleConfig(env)
