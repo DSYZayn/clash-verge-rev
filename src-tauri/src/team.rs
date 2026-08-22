@@ -512,7 +512,8 @@ async fn tailscale_up(key: &str) -> Result<()> {
     let result = tailscale_command()
         .arg("up")
         .arg(path_arg)
-        .args(if cfg!(windows) { &["--unattended"][..] } else { &[][..] })
+        .arg("--accept-routes")
+        .arg("--accept-dns=true")
         .stdin(Stdio::null())
         .output()
         .await
