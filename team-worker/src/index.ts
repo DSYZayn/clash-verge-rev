@@ -221,12 +221,86 @@ async function authenticate(request: Request, env: Env): Promise<JWTPayload> {
   }
 }
 
+function extractDisplayName(identity: JWTPayload): string | null {
+  const raw = identity as Record<string, unknown>
+  const email = typeof raw.email === 'string' ? raw.email.trim() : null
+  const isEmail = (s: string) => Boolean(email && s.toLowerCase() === email.toLowerCase())
+
+  // Priority list of direct claim names (Casdoor, standard OIDC, Cloudflare Access)
+  const candidateKeys = [
+    'displayName',
+    'display_name',
+    'preferred_username',
+    'preferredUsername',
+    'nickname',
+    'nickName',
+    'username',
+    'user_name',
+    'name',
+  ]
+
+  for (const key of candidateKeys) {
+    const val = raw[key]
+    if (typeof val === 'string') {
+      const trimmed = val.trim()
+      if (trimmed && !isEmail(trimmed)) {
+        return trimmed
+      }
+    }
+  }
+
+  // Check nested claims (custom_attributes, custom_claims, user_metadata, profile)
+  const nestedObjects = [raw.custom_attributes, raw.custom_claims, raw.user_metadata, raw.profile]
+  for (const obj of nestedObjects) {
+    if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+      const nested = obj as Record<string, unknown>
+      for (const key of candidateKeys) {
+        const val = nested[key]
+        if (typeof val === 'string') {
+          const trimmed = val.trim()
+          if (trimmed && !isEmail(trimmed)) {
+            return trimmed
+          }
+        }
+      }
+    }
+  }
+
+  // Handle given_name and family_name combinations (e.g. Chinese "张三" or Western "John Doe")
+  const givenName =
+    typeof raw.given_name === 'string'
+      ? raw.given_name.trim()
+      : typeof raw.givenName === 'string'
+        ? raw.givenName.trim()
+        : ''
+  const familyName =
+    typeof raw.family_name === 'string'
+      ? raw.family_name.trim()
+      : typeof raw.familyName === 'string'
+        ? raw.familyName.trim()
+        : ''
+
+  if (givenName && familyName) {
+    const hasCJK = /[\u4e00-\u9fa5]/.test(givenName) || /[\u4e00-\u9fa5]/.test(familyName)
+    return hasCJK ? `${familyName}${givenName}` : `${givenName} ${familyName}`
+  }
+  if (givenName && !isEmail(givenName)) return givenName
+  if (familyName && !isEmail(familyName)) return familyName
+
+  // Fallback to name if present even if it looks like email
+  if (typeof raw.name === 'string' && raw.name.trim()) {
+    return raw.name.trim()
+  }
+
+  return email
+}
+
 async function getUser(
   env: Env,
   identity: JWTPayload,
 ): Promise<UserRow | null> {
   const subject = identity.sub
-  const email = typeof identity.email === 'string' ? identity.email : undefined
+  const email = typeof identity.email === 'string' ? identity.email.trim() : undefined
   if (!subject) return null
 
   const user = await env.TEAM_DB.prepare(
@@ -241,24 +315,52 @@ async function getUser(
     .bind(subject, email ?? null)
     .first<UserRow>()
 
-  // Administrators can provision a user by email before the user's first
-  // login. Replace the pending key with the immutable Access subject as soon
-  // as Access resolves the OAuth token into a signed identity assertion.
-  if (
-    user &&
-    user.access_subject !== subject &&
-    email &&
-    user.email?.toLowerCase() === email.toLowerCase()
-  ) {
-    await env.TEAM_DB.prepare(
-      `UPDATE users
-          SET access_subject = ?1, updated_at = CURRENT_TIMESTAMP
-        WHERE access_subject = ?2`,
-    )
-      .bind(subject, user.access_subject)
-      .run()
-    user.access_subject = subject
+  if (user) {
+    // Administrators can provision a user by email before the user's first
+    // login. Replace the pending key with the immutable Access subject as soon
+    // as Access resolves the OAuth token into a signed identity assertion.
+    if (
+      user.access_subject !== subject &&
+      email &&
+      user.email?.toLowerCase() === email.toLowerCase()
+    ) {
+      await env.TEAM_DB.prepare(
+        `UPDATE users
+            SET access_subject = ?1, updated_at = CURRENT_TIMESTAMP
+          WHERE access_subject = ?2`,
+      )
+        .bind(subject, user.access_subject)
+        .run()
+      user.access_subject = subject
+    }
+
+    // Auto-sync display name and email if a better/updated name is present in SSO identity
+    const currentName = user.display_name?.trim() ?? ''
+    const ssoDisplayName = extractDisplayName(identity)
+    const shouldUpdateName =
+      ssoDisplayName &&
+      ssoDisplayName !== currentName &&
+      (currentName === '' || (user.email && currentName.toLowerCase() === user.email.toLowerCase()) || ssoDisplayName !== email)
+
+    if (shouldUpdateName) {
+      await env.TEAM_DB.prepare(
+        'UPDATE users SET display_name = ?1, updated_at = CURRENT_TIMESTAMP WHERE access_subject = ?2',
+      )
+        .bind(ssoDisplayName, user.access_subject)
+        .run()
+      user.display_name = ssoDisplayName
+    }
+
+    if (email && email !== user.email) {
+      await env.TEAM_DB.prepare(
+        'UPDATE users SET email = ?1, updated_at = CURRENT_TIMESTAMP WHERE access_subject = ?2',
+      )
+        .bind(email, user.access_subject)
+        .run()
+      user.email = email
+    }
   }
+
   return user
 }
 
@@ -272,11 +374,8 @@ async function provisionUser(
 ): Promise<UserRow | null> {
   const subject = identity.sub
   if (!subject) return null
-  const email = typeof identity.email === 'string' ? identity.email : null
-  const displayName =
-    typeof identity.name === 'string' && identity.name.trim() !== ''
-      ? identity.name
-      : email
+  const email = typeof identity.email === 'string' ? identity.email.trim() : null
+  const displayName = extractDisplayName(identity)
   await env.TEAM_DB.prepare(
     `INSERT INTO users (access_subject, email, display_name, enabled)
      VALUES (?1, ?2, ?3, 1)
