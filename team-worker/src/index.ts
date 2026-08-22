@@ -33,6 +33,10 @@ interface Env {
   TAILSCALE_OAUTH_CLIENT_SECRET?: string
   ADMIN_EMAIL?: string
   DEFAULT_TAILSCALE_KEY_EXPIRY_SECONDS?: string
+  CASDOOR_ENDPOINT?: string
+  CASDOOR_CLIENT_ID?: string
+  CASDOOR_CLIENT_SECRET?: string
+  CASDOOR_ORGANIZATION?: string
 }
 
 interface UserRow {
@@ -863,6 +867,91 @@ async function requireAdmin(identity: JWTPayload, env: Env) {
     throw new Response('Administrator access required', { status: 403 })
 }
 
+async function syncFromCasdoor(
+  env: Env,
+  endpointOverride?: string,
+  clientIdOverride?: string,
+  clientSecretOverride?: string,
+  orgOverride?: string,
+): Promise<{ synced: number; total: number }> {
+  const endpoint = (endpointOverride || env.CASDOOR_ENDPOINT || '').trim().replace(/\/$/, '')
+  const clientId = (clientIdOverride || env.CASDOOR_CLIENT_ID || 'd2dae0cd16d426477785').trim()
+  const clientSecret = (clientSecretOverride || env.CASDOOR_CLIENT_SECRET || 'cb95dbf1289960e0e1843e39bb5a806d6fb6a242').trim()
+  const org = (orgOverride || env.CASDOOR_ORGANIZATION || 'built-in').trim()
+
+  if (!endpoint) {
+    throw new Response(
+      JSON.stringify({ error: 'Casdoor 服务地址未填写（例如 https://door.example.com）' }),
+      { status: 400, headers: { 'content-type': 'application/json' } },
+    )
+  }
+
+  const authHeader = `Basic ${btoa(`${clientId}:${clientSecret}`)}`
+  const url = `${endpoint}/api/get-users?owner=${encodeURIComponent(org)}`
+  let response: Response
+  try {
+    response = await fetch(url, {
+      headers: { authorization: authHeader },
+    })
+  } catch (error) {
+    console.error('Casdoor fetch users failed:', describeError(error))
+    throw new Response(
+      JSON.stringify({ error: `无法连接 Casdoor (${endpoint})` }),
+      { status: 502, headers: { 'content-type': 'application/json' } },
+    )
+  }
+
+  if (!response.ok) {
+    throw new Response(
+      JSON.stringify({ error: `Casdoor API 返回错误 (HTTP ${response.status})` }),
+      { status: 502, headers: { 'content-type': 'application/json' } },
+    )
+  }
+
+  const data = (await response.json()) as {
+    status: string
+    data: Array<{ name: string; displayName?: string; email?: string; firstName?: string; lastName?: string }>
+  }
+
+  if (data.status !== 'ok' || !Array.isArray(data.data)) {
+    throw new Response(
+      JSON.stringify({ error: 'Casdoor API 返回数据格式不符合预期' }),
+      { status: 502, headers: { 'content-type': 'application/json' } },
+    )
+  }
+
+  let synced = 0
+  for (const u of data.data) {
+    let realName = u.displayName?.trim() || ''
+    if (!realName && u.firstName && u.lastName) {
+      const hasCJK = /[\u4e00-\u9fa5]/.test(u.firstName) || /[\u4e00-\u9fa5]/.test(u.lastName)
+      realName = hasCJK ? `${u.lastName.trim()}${u.firstName.trim()}` : `${u.firstName.trim()} ${u.lastName.trim()}`
+    }
+    if (!realName) realName = u.name?.trim() || ''
+    if (!realName) continue
+    const email = u.email?.trim().toLowerCase()
+    const name = u.name?.trim().toLowerCase()
+    if (email) {
+      const res = await env.TEAM_DB.prepare(
+        'UPDATE users SET display_name = ?1, updated_at = CURRENT_TIMESTAMP WHERE lower(email) = ?2',
+      )
+        .bind(realName, email)
+        .run()
+      if (res.meta.changes > 0) synced++
+    }
+    if (name) {
+      const res = await env.TEAM_DB.prepare(
+        'UPDATE users SET display_name = ?1, updated_at = CURRENT_TIMESTAMP WHERE lower(email) LIKE ?2 AND display_name = email',
+      )
+        .bind(realName, `${name}@%`)
+        .run()
+      if (res.meta.changes > 0) synced++
+    }
+  }
+
+  return { synced, total: data.data.length }
+}
+
 async function handleAdminUsers(request: Request, env: Env, identity: JWTPayload, currentUser: UserRow) {
   await requireAdmin(identity, env)
   const url = new URL(request.url)
@@ -915,6 +1004,13 @@ async function handleAdminUsers(request: Request, env: Env, identity: JWTPayload
       }
     }))
     return json({ users })
+  }
+  if (request.method === 'POST' && url.pathname.endsWith('/sync-casdoor')) {
+    const body = await parseJsonBody(request).catch(() => ({} as Record<string, unknown>))
+    const endpoint = typeof body.endpoint === 'string' ? body.endpoint : undefined
+    const org = typeof body.org === 'string' ? body.org : undefined
+    const outcome = await syncFromCasdoor(env, endpoint, undefined, undefined, org)
+    return json({ ok: true, ...outcome })
   }
   const match = url.pathname.match(/^\/v1\/admin\/users\/([^/]+)(?:\/role)?$/)
   if (request.method === 'PATCH' && match) {
