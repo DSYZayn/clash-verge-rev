@@ -249,11 +249,11 @@ function extractDisplayName(identity: JWTPayload, identityDetails?: Record<strin
     'display_name',
     'preferred_username',
     'preferredUsername',
-    'nickname',
-    'nickName',
     'username',
     'user_name',
     'name',
+    'nickname',
+    'nickName',
   ]
 
   for (const key of candidateKeys) {
@@ -266,8 +266,17 @@ function extractDisplayName(identity: JWTPayload, identityDetails?: Record<strin
     }
   }
 
-  // Check nested claims (custom_attributes, custom_claims, user_metadata, profile, custom, idp)
-  const nestedObjects = [raw.custom_attributes, raw.custom_claims, raw.user_metadata, raw.profile, raw.custom, raw.idp]
+  // Check nested claims (custom_attributes, custom_claims, user_metadata, profile, custom, idp, raw_attributes)
+  const nestedObjects = [
+    raw.custom_attributes,
+    raw.custom_claims,
+    raw.user_metadata,
+    raw.profile,
+    raw.custom,
+    raw.idp,
+    raw.raw_attributes,
+    raw.claims,
+  ]
   for (const obj of nestedObjects) {
     if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
       const nested = obj as Record<string, unknown>
@@ -283,19 +292,27 @@ function extractDisplayName(identity: JWTPayload, identityDetails?: Record<strin
     }
   }
 
-  // Handle given_name and family_name combinations (e.g. Chinese "张三" or Western "John Doe")
+  // Handle first_name and last_name combinations (Casdoor mapping / OIDC)
   const givenName =
-    typeof raw.given_name === 'string'
-      ? raw.given_name.trim()
-      : typeof raw.givenName === 'string'
-        ? raw.givenName.trim()
-        : ''
+    typeof raw.firstName === 'string'
+      ? raw.firstName.trim()
+      : typeof raw.first_name === 'string'
+        ? raw.first_name.trim()
+        : typeof raw.given_name === 'string'
+          ? raw.given_name.trim()
+          : typeof raw.givenName === 'string'
+            ? raw.givenName.trim()
+            : ''
   const familyName =
-    typeof raw.family_name === 'string'
-      ? raw.family_name.trim()
-      : typeof raw.familyName === 'string'
-        ? raw.familyName.trim()
-        : ''
+    typeof raw.lastName === 'string'
+      ? raw.lastName.trim()
+      : typeof raw.last_name === 'string'
+        ? raw.last_name.trim()
+        : typeof raw.family_name === 'string'
+          ? raw.family_name.trim()
+          : typeof raw.familyName === 'string'
+            ? raw.familyName.trim()
+            : ''
 
   if (givenName && familyName) {
     const hasCJK = /[\u4e00-\u9fa5]/.test(givenName) || /[\u4e00-\u9fa5]/.test(familyName)
