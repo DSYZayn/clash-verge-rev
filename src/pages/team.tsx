@@ -31,6 +31,7 @@ import {
   refreshTeamAccount,
   refreshTailscale,
   syncTeamProfile,
+  switchTailscaleAccount,
 } from '@/services/cmds'
 import { useQuery } from '@/services/query-client'
 import { errorDetail } from '@/services/notice-service'
