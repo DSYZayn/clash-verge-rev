@@ -875,8 +875,15 @@ async function syncFromCasdoor(
   orgOverride?: string,
 ): Promise<{ synced: number; total: number }> {
   const endpoint = (endpointOverride || env.CASDOOR_ENDPOINT || '').trim().replace(/\/$/, '')
-  const clientId = (clientIdOverride || env.CASDOOR_CLIENT_ID || 'd2dae0cd16d426477785').trim()
-  const clientSecret = (clientSecretOverride || env.CASDOOR_CLIENT_SECRET || 'cb95dbf1289960e0e1843e39bb5a806d6fb6a242').trim()
+  const clientId = (clientIdOverride || env.CASDOOR_CLIENT_ID || '').trim()
+  const clientSecret = (clientSecretOverride || env.CASDOOR_CLIENT_SECRET || '').trim()
+
+  if (!clientId || !clientSecret) {
+    throw new Response(
+      JSON.stringify({ error: '请在 Worker 环境变量中配置 CASDOOR_CLIENT_ID 和 CASDOOR_CLIENT_SECRET' }),
+      { status: 500, headers: { 'content-type': 'application/json' } },
+    )
+  }
   const org = (orgOverride || env.CASDOOR_ORGANIZATION || 'built-in').trim()
 
   if (!endpoint) {
