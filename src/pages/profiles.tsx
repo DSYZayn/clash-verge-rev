@@ -774,6 +774,7 @@ const ProfilePage = () => {
               <IconButton
                 size="small"
                 color="inherit"
+                disabled={profiles.current === 'RTEAMMANAGED'}
                 title={t('profiles.page.actions.viewRuntimeConfig')}
                 onClick={() => configRef.current?.open()}
               >
