@@ -47,6 +47,11 @@ pub async fn refresh_tailscale() -> CmdResult<team::TeamStatus> {
 }
 
 #[tauri::command]
+pub async fn check_tailscale_update() -> CmdResult<team::TeamStatus> {
+    team::check_tailscale_update().await.stringify_err()
+}
+
+#[tauri::command]
 pub async fn logout_tailscale() -> CmdResult<team::TeamStatus> {
     team::tailscale_logout().await.stringify_err()
 }
@@ -69,6 +74,11 @@ pub async fn connect_cloudflare_one() -> CmdResult<team::TeamStatus> {
 #[tauri::command]
 pub async fn refresh_cloudflare_one() -> CmdResult<team::TeamStatus> {
     team::refresh_cloudflare_one().await.stringify_err()
+}
+
+#[tauri::command]
+pub async fn check_cloudflare_one_update() -> CmdResult<team::TeamStatus> {
+    team::check_cloudflare_one_update().await.stringify_err()
 }
 
 #[tauri::command]

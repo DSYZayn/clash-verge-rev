@@ -860,6 +860,23 @@ async function handleDesktopTailscale(request: Request, env: Env, user: UserRow)
     const addresses = Array.isArray(body.addresses) ? body.addresses.filter((v): v is string => typeof v === 'string') : []
     const hostname = typeof body.hostname === 'string' ? body.hostname.slice(0, 255) : null
     const teamDeviceId = typeof body.deviceId === 'string' ? body.deviceId.slice(0, 64) : null
+    const existing = await env.TEAM_DB.prepare(
+      'SELECT access_subject, revoked_at FROM tailscale_devices WHERE node_id = ?1',
+    ).bind(nodeId).first<{ access_subject: string; revoked_at: number | null }>()
+    if (existing && existing.access_subject !== user.access_subject)
+      return json({ error: 'Tailscale device belongs to another account' }, 403)
+    if (existing?.revoked_at !== null && existing?.revoked_at !== undefined)
+      return json({ error: 'Tailscale device access has been revoked; reconnect is required' }, 410)
+    if (teamDeviceId) {
+      const issuance = await env.TEAM_DB.prepare(
+        `SELECT revoked_at AS revokedAt
+           FROM tailscale_key_issuances
+          WHERE access_subject = ?1 AND team_device_id = ?2
+          ORDER BY issued_at DESC LIMIT 1`,
+      ).bind(user.access_subject, teamDeviceId).first<{ revokedAt: number | null }>()
+      if (issuance?.revokedAt !== null && issuance?.revokedAt !== undefined)
+        return json({ error: 'The Tailscale device authorization has been revoked; reconnect is required' }, 410)
+    }
     await ensureTailscaleDeviceKeyExpiry(env, nodeId, tag)
     await env.TEAM_DB.prepare(
       `INSERT INTO tailscale_devices (node_id, access_subject, team_device_id, hostname, ipv4, ipv6, role, tag, online, last_seen)
@@ -886,6 +903,16 @@ async function handleDesktopTailscale(request: Request, env: Env, user: UserRow)
       ).bind(Math.floor(Date.now() / 1000), user.access_subject, teamDeviceId).run()
     }
     return json({ ok: true, nodeId, role, tag })
+  }
+  if (request.method === 'POST' && request.url.endsWith('/validate')) {
+    const body = await parseJsonBody(request)
+    const nodeId = typeof body.nodeId === 'string' ? body.nodeId : ''
+    const row = nodeId
+      ? await env.TEAM_DB.prepare(
+        'SELECT revoked_at FROM tailscale_devices WHERE node_id = ?1 AND access_subject = ?2',
+      ).bind(nodeId, user.access_subject).first<{ revoked_at: number | null }>()
+      : null
+    return json({ valid: Boolean(row && row.revoked_at === null), nodeId })
   }
   if (request.method === 'POST' && request.url.endsWith('/logout')) {
     const body = await parseJsonBody(request)
@@ -1106,7 +1133,11 @@ async function handleAdminUsers(request: Request, env: Env, identity: JWTPayload
         }
       }
     }
-    await env.TEAM_DB.prepare('DELETE FROM tailscale_devices WHERE node_id=?1').bind(nodeId).run()
+    // Keep a tombstone so an already-running local Tailscale daemon cannot
+    // silently re-enrol the same node after an administrator revokes it.
+    await env.TEAM_DB.prepare(
+      'UPDATE tailscale_devices SET online=0, revoked_at=COALESCE(revoked_at, ?1), updated_at=CURRENT_TIMESTAMP WHERE node_id=?2',
+    ).bind(Math.floor(Date.now() / 1000), nodeId).run()
     await audit(env, currentUser, 'tailscale_device_revoked')
     return json({ ok: true, nodeId })
   }

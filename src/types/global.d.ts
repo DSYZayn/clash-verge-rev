@@ -294,6 +294,7 @@ interface ITeamStatus {
 interface ITailscaleProfile {
   id: string
   name: string
+  accountName?: string
   active: boolean
   tailnet?: string
 }
@@ -314,6 +315,7 @@ interface ITailscaleStatus {
   role?: string
   tag?: string
   profiles?: ITailscaleProfile[]
+  update?: IClientUpdateStatus
   netcheck?: ITailscaleNetcheck
   netcheckAt?: number
 }
@@ -353,6 +355,14 @@ interface ICloudflareOneStatus {
   locationMatch?: boolean
   checkedAt?: number
   lastCheckedAt?: number
+  error?: string
+  update?: IClientUpdateStatus
+}
+
+interface IClientUpdateStatus {
+  latestVersion?: string
+  updateAvailable: boolean
+  checkedAt?: number
   error?: string
 }
 
@@ -1023,6 +1033,8 @@ interface IVergeConfig {
   }
   auto_close_connection?: boolean
   auto_check_update?: boolean
+  tailscale_auto_update_check?: boolean
+  cloudflare_one_auto_update_check?: boolean
   default_latency_test?: string
   default_latency_timeout?: number
   enable_auto_delay_detection?: boolean

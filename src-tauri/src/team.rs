@@ -36,8 +36,11 @@ const SESSION_FILE: &str = "team-session.enc";
 const DEVICE_ID_FILE: &str = "team-device-id";
 const TAILSCALE_KEY_PATH: &str = "/v1/desktop/tailscale/key";
 const TAILSCALE_RECONCILE_PATH: &str = "/v1/desktop/tailscale/reconcile";
+const TAILSCALE_VALIDATE_PATH: &str = "/v1/desktop/tailscale/validate";
 const TAILSCALE_LOGOUT_PATH: &str = "/v1/desktop/tailscale/logout";
 const TAILSCALE_KEY_EXPIRY_SECONDS: u64 = 7 * 24 * 60 * 60;
+const TAILSCALE_RELEASES_URL: &str = "https://api.github.com/repos/tailscale/tailscale/releases/latest";
+const CLOUDFLARE_RELEASES_URL: &str = "https://developers.cloudflare.com/cloudflare-one/team-and-resources/devices/cloudflare-one-client/download/index.md";
 static BACKGROUND_STARTED: AtomicBool = AtomicBool::new(false);
 /// Country code observed immediately before WARP is connected. This is the
 /// route supplied by Clash TUN in the documented verification flow.
@@ -47,6 +50,10 @@ static CLASH_TUN_LOCATION: once_cell::sync::Lazy<Mutex<Option<String>>> =
 /// takes several seconds, so it runs on demand only and is cached here; the
 /// periodic status path re-serves this value instead of probing again.
 static NETCHECK_CACHE: once_cell::sync::Lazy<Mutex<Option<(u64, TailscaleNetcheck)>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(None));
+static TAILSCALE_UPDATE_CACHE: once_cell::sync::Lazy<Mutex<Option<ClientUpdateStatus>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(None));
+static CLOUDFLARE_UPDATE_CACHE: once_cell::sync::Lazy<Mutex<Option<ClientUpdateStatus>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(None));
 
 #[derive(Debug, Clone, Deserialize)]
@@ -152,11 +159,21 @@ pub struct TailscaleInfo {
     pub tag: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientUpdateStatus {
+    pub latest_version: Option<String>,
+    pub update_available: bool,
+    pub checked_at: Option<u64>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct TailscaleProfile {
     pub id: String,
     pub name: String,
+    pub account_name: Option<String>,
     pub active: bool,
     pub tailnet: Option<String>,
 }
@@ -181,6 +198,7 @@ pub struct TailscaleStatus {
     pub role: Option<String>,
     pub tag: Option<String>,
     pub profiles: Vec<TailscaleProfile>,
+    pub update: ClientUpdateStatus,
     pub netcheck: Option<TailscaleNetcheck>,
     pub netcheck_at: Option<u64>,
 }
@@ -232,6 +250,7 @@ pub struct CloudflareOneStatus {
     pub location_match: Option<bool>,
     pub last_checked_at: u64,
     pub error: Option<String>,
+    pub update: ClientUpdateStatus,
 }
 
 #[derive(Deserialize)]
@@ -252,6 +271,11 @@ struct TailscaleKeyResponse {
 struct TailscaleReconcileResponse {
     role: Option<String>,
     tag: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TailscaleValidateResponse {
+    valid: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -791,10 +815,49 @@ async fn tailscale_status_snapshot() -> TailscaleStatus {
         }
     }
     result.profiles = tailscale_profiles().await;
+    result.update = TAILSCALE_UPDATE_CACHE.lock().clone().unwrap_or_default();
     result
 }
 
 async fn tailscale_profiles() -> Vec<TailscaleProfile> {
+    if let Ok(output) = tailscale_output(&["switch", "--list", "--json"]).await
+        && output.status.success()
+        && let Ok(values) = serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout)
+    {
+        let profiles = values
+            .into_iter()
+            .filter_map(|value| {
+                let id = value.get("id")?.as_str()?.to_string();
+                let account_name = value
+                    .get("account")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned);
+                let nickname = value
+                    .get("nickname")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned);
+                Some(TailscaleProfile {
+                    id,
+                    name: account_name.clone().or(nickname).unwrap_or_else(|| "未命名账号".into()),
+                    account_name,
+                    active: value
+                        .get("selected")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                    tailnet: value
+                        .get("tailnet")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                })
+            })
+            .collect::<Vec<_>>();
+        if !profiles.is_empty() {
+            return profiles;
+        }
+    }
+
     let Ok(output) = tailscale_output(&["switch", "--list"]).await else {
         return Vec::new();
     };
@@ -812,12 +875,18 @@ async fn tailscale_profiles() -> Vec<TailscaleProfile> {
         let cleaned = line.trim_end_matches('*').trim();
         let parts: Vec<&str> = cleaned.split_whitespace().collect();
         if let Some(first) = parts.first() {
-            let name = parts.get(1).copied().unwrap_or(first);
+            // `tailscale switch --list` prints ID, Tailnet, and Account. The
+            // second column is the tailnet, not the login identity users need
+            // to choose from.
+            let tailnet = parts.get(1).map(|value| (*value).to_string());
+            let account_name = parts.get(2..).map(|values| values.join(" "));
+            let account_name = account_name.filter(|value| !value.is_empty());
             profiles.push(TailscaleProfile {
                 id: (*first).to_string(),
-                name: name.to_string(),
+                name: account_name.clone().unwrap_or_else(|| (*first).to_string()),
+                account_name,
                 active: is_active,
-                tailnet: parts.get(2).map(|s| (*s).to_string()),
+                tailnet,
             });
         }
     }
@@ -934,6 +1003,163 @@ fn parse_warp_version(text: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn version_parts(value: &str) -> Vec<u64> {
+    value
+        .split(|character: char| !character.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<u64>().ok())
+        .collect()
+}
+
+fn version_is_newer(current: Option<&str>, latest: Option<&str>) -> bool {
+    let (Some(current), Some(latest)) = (current, latest) else {
+        return false;
+    };
+    let current = version_parts(current);
+    let latest = version_parts(latest);
+    if current.is_empty() || latest.is_empty() {
+        return false;
+    }
+    let length = current.len().max(latest.len());
+    (0..length).any(|index| {
+        let current_part = current.get(index).copied().unwrap_or_default();
+        let latest_part = latest.get(index).copied().unwrap_or_default();
+        latest_part > current_part
+            && (0..index).all(|previous| {
+                current.get(previous).copied().unwrap_or_default() == latest.get(previous).copied().unwrap_or_default()
+            })
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn cloudflare_platform_name() -> &'static str {
+    "Windows"
+}
+
+#[cfg(target_os = "macos")]
+fn cloudflare_platform_name() -> &'static str {
+    "macOS"
+}
+
+#[cfg(target_os = "linux")]
+fn cloudflare_platform_name() -> &'static str {
+    "Linux"
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn cloudflare_platform_name() -> &'static str {
+    ""
+}
+
+fn extract_cloudflare_latest_version(markdown: &str) -> Option<String> {
+    let platform = cloudflare_platform_name();
+    if platform.is_empty() {
+        return None;
+    }
+    let heading = format!("## {platform}");
+    let section = markdown.split_once(&heading)?.1;
+    let section = section.split_once("\n## ").map_or(section, |(value, _)| value);
+    let marker = format!("**Version:** {platform} ");
+    let value = section.split_once(&marker)?.1;
+    let value = value.split("**").next()?.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+async fn check_tailscale_update_snapshot(current: Option<&str>) -> ClientUpdateStatus {
+    let checked_at = now();
+    let result: std::result::Result<String, String> = async {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(4))
+            .timeout(Duration::from_secs(8))
+            .build()
+            .map_err(|error| error.to_string())?;
+        let response = client
+            .get(TAILSCALE_RELEASES_URL)
+            .header(reqwest::header::USER_AGENT, "clash-verge-rev")
+            .send()
+            .await
+            .map_err(|error| error.to_string())?
+            .error_for_status()
+            .map_err(|error| error.to_string())?;
+        let payload = response
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|error| error.to_string())?;
+        payload
+            .get("tag_name")
+            .and_then(serde_json::Value::as_str)
+            .map(|value| value.trim_start_matches('v').to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "Tailscale release response did not contain a version".to_string())
+    }
+    .await;
+    match result {
+        Ok(latest_version) => ClientUpdateStatus {
+            update_available: version_is_newer(current, Some(&latest_version)),
+            latest_version: Some(latest_version),
+            checked_at: Some(checked_at),
+            error: None,
+        },
+        Err(error) => ClientUpdateStatus {
+            checked_at: Some(checked_at),
+            error: Some(error),
+            ..ClientUpdateStatus::default()
+        },
+    }
+}
+
+async fn check_cloudflare_update_snapshot(current: Option<&str>) -> ClientUpdateStatus {
+    let checked_at = now();
+    let result: std::result::Result<String, String> = async {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(4))
+            .timeout(Duration::from_secs(8))
+            .build()
+            .map_err(|error| error.to_string())?;
+        let response = client
+            .get(CLOUDFLARE_RELEASES_URL)
+            .header(reqwest::header::USER_AGENT, "clash-verge-rev")
+            .send()
+            .await
+            .map_err(|error| error.to_string())?
+            .error_for_status()
+            .map_err(|error| error.to_string())?;
+        extract_cloudflare_latest_version(&response.text().await.map_err(|error| error.to_string())?)
+            .ok_or_else(|| "Cloudflare One Client release page did not contain a version".to_string())
+    }
+    .await;
+    match result {
+        Ok(latest_version) => {
+            // warp-cli reports the client train (for example 2026.7.0),
+            // while Cloudflare's release page appends the build number. The
+            // year/train pair is the stable comparable portion across both.
+            let current_train = version_parts(current.unwrap_or_default())
+                .into_iter()
+                .take(2)
+                .map(|part| part.to_string())
+                .collect::<Vec<_>>()
+                .join(".");
+            let latest_train = version_parts(&latest_version)
+                .into_iter()
+                .take(2)
+                .map(|part| part.to_string())
+                .collect::<Vec<_>>()
+                .join(".");
+            ClientUpdateStatus {
+                update_available: !current_train.is_empty() && current_train != latest_train,
+                latest_version: Some(latest_version),
+                checked_at: Some(checked_at),
+                error: None,
+            }
+        }
+        Err(error) => ClientUpdateStatus {
+            checked_at: Some(checked_at),
+            error: Some(error),
+            ..ClientUpdateStatus::default()
+        },
+    }
+}
+
 fn parse_cloudflare_trace(text: &str) -> CloudflareTrace {
     let mut trace = CloudflareTrace::default();
     for line in text.lines() {
@@ -991,6 +1217,7 @@ async fn cloudflare_one_status_snapshot() -> CloudflareOneStatus {
     let checked_at = now();
     let mut result = CloudflareOneStatus {
         last_checked_at: checked_at,
+        update: CLOUDFLARE_UPDATE_CACHE.lock().clone().unwrap_or_default(),
         ..CloudflareOneStatus::default()
     };
     let Ok((program, version)) = find_warp_cli().await else {
@@ -1148,6 +1375,19 @@ async fn tailscale_reconcile(device_id: &str, snapshot: &TailscaleStatus) -> Res
     .json::<TailscaleReconcileResponse>()
     .await
     .context("invalid Tailscale reconcile response")
+}
+
+async fn tailscale_validate(device_id: &str, node_id: &str) -> Result<bool> {
+    let response = team_post(
+        TAILSCALE_VALIDATE_PATH,
+        serde_json::json!({ "deviceId": device_id, "nodeId": node_id }),
+    )
+    .await?;
+    Ok(response
+        .json::<TailscaleValidateResponse>()
+        .await
+        .context("invalid Tailscale validation response")?
+        .valid)
 }
 
 async fn save_tailscale_reconcile(response: TailscaleReconcileResponse, node_id: Option<String>) -> Result<()> {
@@ -1354,7 +1594,7 @@ async fn usable_session() -> Result<TeamSession> {
 
 pub async fn status() -> Result<TeamStatus> {
     let configured = load_config().is_ok_and(|config| config.enabled);
-    let session = load_session()?;
+    let mut session = load_session()?;
     let profiles = Config::profiles().await;
     let latest = profiles.latest_arc();
     let managed_profile_installed = latest.get_item(MANAGED_PROFILE_UID).is_ok();
@@ -1363,6 +1603,23 @@ pub async fn status() -> Result<TeamStatus> {
     if let Some((checked_at, netcheck)) = NETCHECK_CACHE.lock().clone() {
         tailscale.netcheck = Some(netcheck);
         tailscale.netcheck_at = Some(checked_at);
+    }
+    // Removing a device in the team management page revokes its server-side
+    // record, but Tailscale deliberately leaves the local CLI in Running
+    // state. Validate the record before presenting that stale state as a
+    // successful login, and force a local logout when access was revoked.
+    if tailscale.logged_in
+        && let Some(node_id) = tailscale.node_id.as_deref()
+        && session.as_ref().is_some_and(|value| !value.access_token.is_empty())
+        && let Ok(false) = tailscale_validate(&device_id()?, node_id).await
+    {
+        let _ = tailscale_output(&["logout"]).await;
+        if let Some(mut invalid_session) = load_session()? {
+            invalid_session.tailscale = None;
+            let _ = save_session(&invalid_session);
+            session = load_session()?;
+        }
+        tailscale = tailscale_status_snapshot().await;
     }
     let cloudflare_one = cloudflare_one_status_snapshot().await;
     if let Some(info) = session.as_ref().and_then(|value| value.tailscale.as_ref()) {
@@ -1428,6 +1685,20 @@ pub async fn cloudflare_one_status() -> Result<CloudflareOneStatus> {
     Ok(cloudflare_one_status_snapshot().await)
 }
 
+pub async fn check_tailscale_update() -> Result<TeamStatus> {
+    let snapshot = tailscale_status_snapshot().await;
+    let update = check_tailscale_update_snapshot(snapshot.version.as_deref()).await;
+    *TAILSCALE_UPDATE_CACHE.lock() = Some(update);
+    status().await
+}
+
+pub async fn check_cloudflare_one_update() -> Result<TeamStatus> {
+    let snapshot = cloudflare_one_status_snapshot().await;
+    let update = check_cloudflare_update_snapshot(snapshot.version.as_deref()).await;
+    *CLOUDFLARE_UPDATE_CACHE.lock() = Some(update);
+    status().await
+}
+
 async fn cloudflare_one_command(action: &str) -> Result<CloudflareOneStatus> {
     let (program, _) = find_warp_cli().await?;
 
@@ -1456,6 +1727,9 @@ async fn cloudflare_one_command(action: &str) -> Result<CloudflareOneStatus> {
 }
 
 pub async fn connect_cloudflare_one() -> Result<TeamStatus> {
+    if tailscale_status_snapshot().await.logged_in {
+        bail!("Cloudflare One Client 与 Tailscale 不能同时连接，请先断开 Tailscale");
+    }
     cloudflare_one_command("connect").await?;
     status().await
 }
@@ -1509,6 +1783,9 @@ async fn wait_for_node_identity() -> TailscaleStatus {
     snapshot
 }
 pub async fn tailscale_connect() -> Result<TeamStatus> {
+    if cloudflare_one_status_snapshot().await.connected {
+        bail!("Tailscale 与 Cloudflare One Client 不能同时连接，请先断开 Cloudflare One Client");
+    }
     let device_id = device_id()?;
     let before = tailscale_status_snapshot().await;
     if before.logged_in && before.node_id.is_some() {
@@ -1558,6 +1835,9 @@ pub async fn tailscale_connect() -> Result<TeamStatus> {
 }
 
 pub async fn tailscale_switch_account(account: &str) -> Result<TeamStatus> {
+    if cloudflare_one_status_snapshot().await.connected {
+        bail!("Tailscale 与 Cloudflare One Client 不能同时连接，请先断开 Cloudflare One Client");
+    }
     let output = tailscale_output(&["switch", account]).await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

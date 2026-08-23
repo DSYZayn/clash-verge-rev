@@ -50,6 +50,10 @@ export async function refreshTailscale() {
   return invoke<ITeamStatus>('refresh_tailscale')
 }
 
+export async function checkTailscaleUpdate() {
+  return invoke<ITeamStatus>('check_tailscale_update')
+}
+
 export async function logoutTailscale() {
   return invoke<ITeamStatus>('logout_tailscale')
 }
@@ -64,6 +68,10 @@ export async function connectCloudflareOne() {
 
 export async function refreshCloudflareOne() {
   return invoke<ITeamStatus>('refresh_cloudflare_one')
+}
+
+export async function checkCloudflareOneUpdate() {
+  return invoke<ITeamStatus>('check_cloudflare_one_update')
 }
 
 export async function disconnectCloudflareOne() {

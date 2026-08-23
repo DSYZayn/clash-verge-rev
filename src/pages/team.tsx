@@ -10,6 +10,7 @@ import NetworkCheckOutlinedIcon from '@mui/icons-material/NetworkCheckOutlined'
 import PersonOutlineOutlinedIcon from '@mui/icons-material/PersonOutlineOutlined'
 import PlayArrowOutlinedIcon from '@mui/icons-material/PlayArrowOutlined'
 import RefreshOutlinedIcon from '@mui/icons-material/RefreshOutlined'
+import { open as openUrl } from '@tauri-apps/plugin-shell'
 import {
   Alert,
   Box,
@@ -19,12 +20,18 @@ import {
   Chip,
   CircularProgress,
   Divider,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  FormControlLabel,
   LinearProgress,
   Stack,
+  Switch,
   Typography,
 } from '@mui/material'
 import dayjs from 'dayjs'
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router'
 
 import { BasePage } from '@/components/base'
@@ -32,6 +39,8 @@ import { useVerge } from '@/hooks/use-verge'
 import {
   activateTeamProfile,
   connectCloudflareOne,
+  checkCloudflareOneUpdate,
+  checkTailscaleUpdate,
   connectTailscale,
   disconnectCloudflareOne,
   getTeamStatus,
@@ -121,6 +130,9 @@ const TeamPage = () => {
   })
   const [action, setAction] = useState<string>()
   const [error, setError] = useState<string>()
+  const [connectionConflict, setConnectionConflict] = useState<
+    'tailscale' | 'cloudflare'
+  >()
 
   const run = useCallback(
     async (
@@ -159,6 +171,68 @@ const TeamPage = () => {
     void run('sync', syncTeamProfile, '配置同步失败：')
   }, [refetch, run])
 
+  const tailscaleAutoUpdateCheck = verge?.tailscale_auto_update_check !== false
+  const cloudflareAutoUpdateCheck =
+    verge?.cloudflare_one_auto_update_check !== false
+
+  useEffect(() => {
+    if (!tailscaleAutoUpdateCheck) return
+    const checkedAt = data?.tailscale?.update?.checkedAt
+    if (checkedAt && Date.now() / 1000 - checkedAt < 24 * 60 * 60) return
+    void checkTailscaleUpdate()
+      .then(() => refetch())
+      .catch((reason) =>
+        setError(`Tailscale 自动检查更新失败：${reasonText(reason)}`),
+      )
+  }, [data?.tailscale?.update?.checkedAt, refetch, tailscaleAutoUpdateCheck])
+
+  useEffect(() => {
+    if (!cloudflareAutoUpdateCheck) return
+    const checkedAt = data?.cloudflareOne?.update?.checkedAt
+    if (checkedAt && Date.now() / 1000 - checkedAt < 24 * 60 * 60) return
+    void checkCloudflareOneUpdate()
+      .then(() => refetch())
+      .catch((reason) =>
+        setError(
+          `Cloudflare One Client 自动检查更新失败：${reasonText(reason)}`,
+        ),
+      )
+  }, [
+    data?.cloudflareOne?.update?.checkedAt,
+    refetch,
+    cloudflareAutoUpdateCheck,
+  ])
+
+  const connectAfterConflictResolution = useCallback(async () => {
+    const target = connectionConflict
+    if (!target) return
+    setConnectionConflict(undefined)
+    setAction(`resolve-${target}`)
+    setError(undefined)
+    try {
+      if (target === 'tailscale') {
+        await disconnectCloudflareOne()
+        await connectTailscale()
+      } else {
+        await logoutTailscale()
+        await connectCloudflareOne()
+      }
+      await refetch()
+    } catch (reason) {
+      setError(`切换网络客户端失败：${reasonText(reason)}`)
+    } finally {
+      setAction(undefined)
+    }
+  }, [connectionConflict, refetch])
+
+  const openOfficialDownload = useCallback(async (url: string) => {
+    try {
+      await openUrl(url)
+    } catch (reason) {
+      setError(`打开官方下载页面失败：${reasonText(reason)}`)
+    }
+  }, [])
+
   const quota = data?.account?.quota
   const used = (quota?.upload ?? 0) + (quota?.download ?? 0)
   const percent = quota?.total
@@ -182,6 +256,12 @@ const TeamPage = () => {
           </Alert>
         )}
         {error && <Alert severity="error">{error}</Alert>}
+        {tailscale?.loggedIn && cloudflareOne?.connected && (
+          <Alert severity="error">
+            Tailscale 与 Cloudflare One Client
+            不能同时连接。请断开其中一个客户端后再继续使用。
+          </Alert>
+        )}
 
         <Card variant="outlined">
           <CardContent>
@@ -455,7 +535,7 @@ const TeamPage = () => {
                     {tailscale.profiles.map((p) => (
                       <Chip
                         key={p.id}
-                        label={`${p.name || p.id}${p.active ? ' (当前)' : ''}`}
+                        label={`${p.accountName || p.name || p.id}${p.active ? ' (当前)' : ''}`}
                         color={p.active ? 'primary' : 'default'}
                         variant={p.active ? 'filled' : 'outlined'}
                         onClick={
@@ -464,7 +544,10 @@ const TeamPage = () => {
                             : () =>
                                 run(
                                   'tailscale-switch',
-                                  () => switchTailscaleAccount(p.id),
+                                  () =>
+                                    switchTailscaleAccount(
+                                      p.accountName || p.name || p.id,
+                                    ),
                                   '切换 Tailscale 账号失败：',
                                 )
                         }
@@ -518,13 +601,17 @@ const TeamPage = () => {
                     )
                   }
                   disabled={!data?.authenticated || Boolean(action)}
-                  onClick={() =>
-                    run(
-                      'tailscale-connect',
-                      connectTailscale,
-                      'Tailscale 连接失败：',
-                    )
-                  }
+                  onClick={() => {
+                    if (cloudflareOne?.connected) {
+                      setConnectionConflict('tailscale')
+                    } else {
+                      void run(
+                        'tailscale-connect',
+                        connectTailscale,
+                        'Tailscale 连接失败：',
+                      )
+                    }
+                  }}
                 >
                   连接
                 </Button>
@@ -589,19 +676,72 @@ const TeamPage = () => {
                 </Button>
               )}
               <Button
+                startIcon={
+                  action === 'tailscale-update' ? (
+                    <CircularProgress size={16} />
+                  ) : (
+                    <RefreshOutlinedIcon />
+                  )
+                }
+                disabled={Boolean(action)}
+                onClick={() =>
+                  run(
+                    'tailscale-update',
+                    checkTailscaleUpdate,
+                    'Tailscale 检查更新失败：',
+                  )
+                }
+              >
+                检查更新
+              </Button>
+              <FormControlLabel
+                control={
+                  <Switch
+                    size="small"
+                    checked={tailscaleAutoUpdateCheck}
+                    onChange={(_, checked) => {
+                      void patchVerge({
+                        tailscale_auto_update_check: checked,
+                      }).catch((reason) =>
+                        setError(
+                          `保存 Tailscale 自动检查设置失败：${reasonText(reason)}`,
+                        ),
+                      )
+                    }}
+                  />
+                }
+                label="自动检查更新"
+              />
+              <Button
                 variant="text"
                 endIcon={<LaunchOutlinedIcon />}
                 onClick={() =>
-                  window.open(
-                    'https://tailscale.com/download',
-                    '_blank',
-                    'noopener,noreferrer',
-                  )
+                  void openOfficialDownload('https://tailscale.com/download')
                 }
               >
                 官方下载
               </Button>
             </Stack>
+            {tailscale?.update?.latestVersion && (
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ mt: 1, display: 'block' }}
+              >
+                最新稳定版本：{tailscale.update.latestVersion}
+                {tailscale.update.updateAvailable
+                  ? ' · 有可用更新'
+                  : ' · 已是最新版本'}
+                {tailscale.update.checkedAt
+                  ? ` · 检查于 ${dayjs(tailscale.update.checkedAt * 1000).format('MM-DD HH:mm')}`
+                  : ''}
+              </Typography>
+            )}
+            {tailscale?.update?.error && (
+              <Alert severity="warning" sx={{ mt: 1 }}>
+                Tailscale 更新检查提示：{tailscale.update.error}
+              </Alert>
+            )}
             <Typography
               variant="caption"
               color="text.secondary"
@@ -759,13 +899,17 @@ const TeamPage = () => {
                 {cloudflareOne?.installed && !cloudflareOne.connected && (
                   <Button
                     size="small"
-                    onClick={() =>
-                      run(
-                        'cloudflare-connect',
-                        connectCloudflareOne,
-                        'Cloudflare One Client 连接失败：',
-                      )
-                    }
+                    onClick={() => {
+                      if (tailscale?.loggedIn) {
+                        setConnectionConflict('cloudflare')
+                      } else {
+                        void run(
+                          'cloudflare-connect',
+                          connectCloudflareOne,
+                          'Cloudflare One Client 连接失败：',
+                        )
+                      }
+                    }}
                     disabled={
                       Boolean(action) ||
                       cloudflareOne.running === false ||
@@ -843,19 +987,74 @@ const TeamPage = () => {
                 </>
               )}
               <Button
+                startIcon={
+                  action === 'cloudflare-update' ? (
+                    <CircularProgress size={16} />
+                  ) : (
+                    <RefreshOutlinedIcon />
+                  )
+                }
+                disabled={Boolean(action)}
+                onClick={() =>
+                  run(
+                    'cloudflare-update',
+                    checkCloudflareOneUpdate,
+                    'Cloudflare One Client 检查更新失败：',
+                  )
+                }
+              >
+                检查更新
+              </Button>
+              <FormControlLabel
+                control={
+                  <Switch
+                    size="small"
+                    checked={cloudflareAutoUpdateCheck}
+                    onChange={(_, checked) => {
+                      void patchVerge({
+                        cloudflare_one_auto_update_check: checked,
+                      }).catch((reason) =>
+                        setError(
+                          `保存 Cloudflare One Client 自动检查设置失败：${reasonText(reason)}`,
+                        ),
+                      )
+                    }}
+                  />
+                }
+                label="自动检查更新"
+              />
+              <Button
                 variant="text"
                 endIcon={<LaunchOutlinedIcon />}
                 onClick={() =>
-                  window.open(
-                    'https://developers.cloudflare.com/cloudflare-one/connections/connect-devices/warp/download-warp/',
-                    '_blank',
-                    'noopener,noreferrer',
+                  void openOfficialDownload(
+                    'https://developers.cloudflare.com/cloudflare-one/team-and-resources/devices/cloudflare-one-client/download',
                   )
                 }
               >
                 官方下载
               </Button>
             </Stack>
+            {cloudflareOne?.update?.latestVersion && (
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ mt: 1, display: 'block' }}
+              >
+                最新稳定版本：{cloudflareOne.update.latestVersion}
+                {cloudflareOne.update.updateAvailable
+                  ? ' · 有可用更新'
+                  : ' · 已是最新版本'}
+                {cloudflareOne.update.checkedAt
+                  ? ` · 检查于 ${dayjs(cloudflareOne.update.checkedAt * 1000).format('MM-DD HH:mm')}`
+                  : ''}
+              </Typography>
+            )}
+            {cloudflareOne?.update?.error && (
+              <Alert severity="warning" sx={{ mt: 1 }}>
+                Cloudflare One Client 更新检查提示：{cloudflareOne.update.error}
+              </Alert>
+            )}
             <Typography
               variant="caption"
               color="text.secondary"
@@ -869,6 +1068,29 @@ const TeamPage = () => {
             </Typography>
           </CardContent>
         </Card>
+        <Dialog
+          open={Boolean(connectionConflict)}
+          onClose={() => setConnectionConflict(undefined)}
+        >
+          <DialogTitle>网络客户端不能同时连接</DialogTitle>
+          <DialogContent>
+            {connectionConflict === 'tailscale'
+              ? 'Cloudflare One Client 当前已连接。Tailscale 与 Cloudflare One Client 会争用系统路由，不能同时连接。是否先断开 Cloudflare One Client，再连接 Tailscale？'
+              : 'Tailscale 当前已连接。Tailscale 与 Cloudflare One Client 会争用系统路由，不能同时连接。是否先退出 Tailscale，再连接 Cloudflare One Client？'}
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setConnectionConflict(undefined)}>
+              取消
+            </Button>
+            <Button
+              variant="contained"
+              onClick={() => void connectAfterConflictResolution()}
+              disabled={Boolean(action)}
+            >
+              断开并连接
+            </Button>
+          </DialogActions>
+        </Dialog>
       </Stack>
     </BasePage>
   )

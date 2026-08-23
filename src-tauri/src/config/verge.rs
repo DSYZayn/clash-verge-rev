@@ -110,6 +110,11 @@ pub struct IVerge {
 
     pub auto_check_update: Option<bool>,
 
+    /// Automatically check installed team-network clients for updates.
+    pub tailscale_auto_update_check: Option<bool>,
+
+    pub cloudflare_one_auto_update_check: Option<bool>,
+
     pub default_latency_test: Option<String>,
 
     pub default_latency_timeout: Option<i16>,
@@ -463,6 +468,8 @@ impl IVerge {
 
         patch!(auto_close_connection);
         patch!(auto_check_update);
+        patch!(tailscale_auto_update_check);
+        patch!(cloudflare_one_auto_update_check);
         patch!(default_latency_test);
         patch!(default_latency_timeout);
         patch!(enable_auto_delay_detection);
