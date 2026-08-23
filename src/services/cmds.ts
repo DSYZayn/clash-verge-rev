@@ -62,6 +62,10 @@ export async function getCloudflareOneStatus() {
   return invoke<ICloudflareOneStatus>('get_cloudflare_one_status')
 }
 
+export async function startCloudflareOne() {
+  return invoke<ITeamStatus>('start_cloudflare_one')
+}
+
 export async function connectCloudflareOne() {
   return invoke<ITeamStatus>('connect_cloudflare_one')
 }

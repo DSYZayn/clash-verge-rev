@@ -1,8 +1,9 @@
-import { Button } from '@mui/material'
+import SystemUpdateAltOutlinedIcon from '@mui/icons-material/SystemUpdateAltOutlined'
+import { IconButton, Tooltip } from '@mui/material'
 import { useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { DialogRef } from '@/components/base'
+import type { DialogRef } from '@/components/base'
 import { useUpdate } from '@/hooks/use-update'
 
 import { UpdateViewer } from '../setting/mods/update-viewer'
@@ -24,15 +25,17 @@ export const UpdateButton = (props: Props) => {
     <>
       <UpdateViewer ref={viewerRef} />
 
-      <Button
-        color="error"
-        variant="contained"
-        size="small"
-        className={className}
-        onClick={() => viewerRef.current?.open()}
-      >
-        {t('shared.actions.new')}
-      </Button>
+      <Tooltip title={t('shared.feedback.notifications.updateAvailable')}>
+        <IconButton
+          aria-label={t('shared.feedback.notifications.updateAvailable')}
+          color="error"
+          size="small"
+          className={className}
+          onClick={() => viewerRef.current?.open()}
+        >
+          <SystemUpdateAltOutlinedIcon fontSize="small" />
+        </IconButton>
+      </Tooltip>
     </>
   )
 }

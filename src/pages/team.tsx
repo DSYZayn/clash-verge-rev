@@ -51,6 +51,7 @@ import {
   refreshTeamAccount,
   refreshCloudflareOne,
   refreshTailscale,
+  startCloudflareOne,
   startTailscale,
   syncTeamProfile,
   switchTailscaleAccount,
@@ -176,7 +177,7 @@ const TeamPage = () => {
     verge?.cloudflare_one_auto_update_check !== false
 
   useEffect(() => {
-    if (!tailscaleAutoUpdateCheck) return
+    if (!tailscaleAutoUpdateCheck || !data?.tailscale?.installed) return
     const checkedAt = data?.tailscale?.update?.checkedAt
     if (checkedAt && Date.now() / 1000 - checkedAt < 24 * 60 * 60) return
     void checkTailscaleUpdate()
@@ -184,10 +185,15 @@ const TeamPage = () => {
       .catch((reason) =>
         setError(`Tailscale 自动检查更新失败：${reasonText(reason)}`),
       )
-  }, [data?.tailscale?.update?.checkedAt, refetch, tailscaleAutoUpdateCheck])
+  }, [
+    data?.tailscale?.installed,
+    data?.tailscale?.update?.checkedAt,
+    refetch,
+    tailscaleAutoUpdateCheck,
+  ])
 
   useEffect(() => {
-    if (!cloudflareAutoUpdateCheck) return
+    if (!cloudflareAutoUpdateCheck || !data?.cloudflareOne?.installed) return
     const checkedAt = data?.cloudflareOne?.update?.checkedAt
     if (checkedAt && Date.now() / 1000 - checkedAt < 24 * 60 * 60) return
     void checkCloudflareOneUpdate()
@@ -198,6 +204,7 @@ const TeamPage = () => {
         ),
       )
   }, [
+    data?.cloudflareOne?.installed,
     data?.cloudflareOne?.update?.checkedAt,
     refetch,
     cloudflareAutoUpdateCheck,
@@ -836,6 +843,13 @@ const TeamPage = () => {
               </>
             )}
 
+            {cloudflareOne?.installed && cloudflareOne.running === false && (
+              <Alert severity="warning" sx={{ mt: 2 }}>
+                已检测到 Cloudflare One
+                Client，但后台服务尚未启动。请先启动服务，再进行连接或出口检测。
+              </Alert>
+            )}
+
             {cloudflareOne?.error && (
               <Alert severity="warning" sx={{ mt: 2 }}>
                 Cloudflare One Client 状态提示：{cloudflareOne.error}
@@ -950,6 +964,28 @@ const TeamPage = () => {
             >
               {cloudflareOne?.installed && (
                 <>
+                  {cloudflareOne.running === false && (
+                    <Button
+                      variant="contained"
+                      startIcon={
+                        action === 'cloudflare-start' ? (
+                          <CircularProgress size={16} />
+                        ) : (
+                          <PlayArrowOutlinedIcon />
+                        )
+                      }
+                      disabled={Boolean(action)}
+                      onClick={() =>
+                        run(
+                          'cloudflare-start',
+                          startCloudflareOne,
+                          'Cloudflare One Client 服务启动失败：',
+                        )
+                      }
+                    >
+                      启动服务
+                    </Button>
+                  )}
                   <Button
                     startIcon={
                       action === 'cloudflare-refresh' ? (

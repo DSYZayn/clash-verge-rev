@@ -7,7 +7,10 @@ use crate::{
     config::{Config, PrfExtra, PrfItem, PrfOption, decrypt_data, encrypt_data, profiles},
     core::{CoreManager, handle},
     process::AsyncHandler,
-    utils::dirs,
+    utils::{
+        dirs,
+        network::{NetworkManager, ProxyType},
+    },
 };
 use anyhow::{Context as _, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -40,6 +43,7 @@ const TAILSCALE_VALIDATE_PATH: &str = "/v1/desktop/tailscale/validate";
 const TAILSCALE_LOGOUT_PATH: &str = "/v1/desktop/tailscale/logout";
 const TAILSCALE_KEY_EXPIRY_SECONDS: u64 = 7 * 24 * 60 * 60;
 const TAILSCALE_RELEASES_URL: &str = "https://api.github.com/repos/tailscale/tailscale/releases/latest";
+const TAILSCALE_RELEASES_PAGE_URL: &str = "https://github.com/tailscale/tailscale/releases/latest";
 const CLOUDFLARE_RELEASES_URL: &str = "https://developers.cloudflare.com/cloudflare-one/team-and-resources/devices/cloudflare-one-client/download/index.md";
 static BACKGROUND_STARTED: AtomicBool = AtomicBool::new(false);
 /// Country code observed immediately before WARP is connected. This is the
@@ -535,6 +539,70 @@ async fn start_tailscale_service() -> Result<()> {
     bail!("failed to start the Tailscale service: {detail}");
 }
 
+fn cloudflare_service_command(service_name: &str) -> Command {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("sc.exe");
+        command.args(["start", service_name]);
+        command.creation_flags(0x08000000);
+        command
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = service_name;
+        let mut command = Command::new("open");
+        command.args(["-a", "Cloudflare WARP"]);
+        command
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut command = Command::new("systemctl");
+        command.args(["start", service_name]);
+        command
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    {
+        let _ = service_name;
+        Command::new("warp-cli")
+    }
+}
+
+async fn start_cloudflare_service() -> Result<()> {
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    bail!("starting the Cloudflare One Client service is not supported on this platform");
+
+    #[cfg(windows)]
+    let service_names = ["CloudflareWARP", "Cloudflare WARP", "warp-svc"];
+    #[cfg(target_os = "macos")]
+    let service_names = ["Cloudflare WARP"];
+    #[cfg(target_os = "linux")]
+    let service_names = ["warp-svc"];
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    let service_names = ["warp-svc"];
+
+    let mut last_detail = None;
+    for service_name in service_names {
+        let output = cloudflare_service_command(service_name)
+            .stdin(Stdio::null())
+            .output()
+            .await
+            .with_context(|| "failed to start the Cloudflare One Client service")?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let detail = String::from_utf8_lossy(&output.stderr);
+        let detail = detail.trim();
+        if !detail.is_empty() {
+            last_detail = Some(detail.chars().take(300).collect::<String>());
+        }
+    }
+
+    if let Some(detail) = last_detail {
+        bail!("failed to start the Cloudflare One Client service: {detail}");
+    }
+    bail!("failed to start the Cloudflare One Client service")
+}
+
 fn normalized_netcheck_key(value: &str) -> String {
     value
         .chars()
@@ -757,10 +825,12 @@ async fn tailscale_status_snapshot() -> TailscaleStatus {
     let Ok(version) = tailscale_output(&["version"]).await else {
         return TailscaleStatus::default();
     };
-    if !version.status.success() {
-        return TailscaleStatus::default();
-    }
-    let version = String::from_utf8_lossy(&version.stdout)
+    let version_text = if version.stdout.is_empty() {
+        String::from_utf8_lossy(&version.stderr)
+    } else {
+        String::from_utf8_lossy(&version.stdout)
+    };
+    let version = version_text
         .lines()
         .next()
         .map(str::trim)
@@ -940,16 +1010,29 @@ async fn warp_cli_output(program: &Path, args: &[&str]) -> Result<std::process::
 
 async fn find_warp_cli() -> Result<(PathBuf, Option<String>)> {
     let mut last_error = None;
+    let mut found_program = None;
+    let mut found_version = None;
     for candidate in warp_cli_candidates() {
         for version_args in [["--version"].as_slice(), ["version"].as_slice()] {
             match warp_cli_output(&candidate, version_args).await {
                 Ok(output) if output.status.success() => {
                     return Ok((candidate, parse_warp_version(&warp_cli_text(&output))));
                 }
-                Ok(output) => last_error = Some(warp_cli_text(&output)),
+                Ok(output) => {
+                    // A stopped WARP daemon can make the version probe exit
+                    // non-zero even though the CLI is installed. Keep the
+                    // executable so the status path can report `running =
+                    // false` and offer the service start action.
+                    found_program.get_or_insert_with(|| candidate.clone());
+                    found_version = found_version.or_else(|| parse_warp_version(&warp_cli_text(&output)));
+                    last_error = Some(warp_cli_text(&output));
+                }
                 Err(error) => last_error = Some(error.to_string()),
             }
         }
+    }
+    if let Some(program) = found_program {
+        return Ok((program, found_version));
     }
     let detail = last_error
         .filter(|value| !value.trim().is_empty())
@@ -1057,42 +1140,87 @@ fn extract_cloudflare_latest_version(markdown: &str) -> Option<String> {
         return None;
     }
     let heading = format!("## {platform}");
+    // The page puts a `## Footnotes` subsection between the platform table
+    // and its release entries. Keep the whole remainder instead of stopping
+    // at the first heading; the platform-specific version marker is unique
+    // and the first match is the latest release.
     let section = markdown.split_once(&heading)?.1;
-    let section = section.split_once("\n## ").map_or(section, |(value, _)| value);
     let marker = format!("**Version:** {platform} ");
     let value = section.split_once(&marker)?.1;
     let value = value.split("**").next()?.trim();
     (!value.is_empty()).then(|| value.to_string())
 }
 
+/// Fetch public release metadata through the same local Clash proxy that is
+/// used for subscriptions, then try the system proxy and a direct request.
+/// Team builds are commonly used on networks where GitHub and Cloudflare are
+/// not reachable without a proxy.
+async fn fetch_update_text(url: &str) -> Result<String> {
+    let network = NetworkManager::new();
+    let mut errors = Vec::new();
+    for proxy_type in [ProxyType::Localhost, ProxyType::System, ProxyType::None] {
+        match network
+            .get_with_interrupt(
+                url,
+                proxy_type,
+                Some(8),
+                Some("clash-verge-rev update checker".into()),
+                false,
+            )
+            .await
+        {
+            Ok(response) if response.status().is_success() => {
+                return response
+                    .text_with_charset()
+                    .map(str::to_owned)
+                    .context("failed to read update response body");
+            }
+            Ok(response) => errors.push(format!("HTTP {}", response.status())),
+            Err(error) => errors.push(error.to_string()),
+        }
+    }
+    bail!("update request failed: {}", errors.join("; "))
+}
+
+fn extract_tailscale_page_version(page: &str) -> Option<String> {
+    let lower = page.to_ascii_lowercase();
+    let marker = "release v";
+    let start = lower.find(marker).map(|index| index + marker.len())?;
+    let value: String = page[start..]
+        .chars()
+        .take_while(|character| character.is_ascii_digit() || *character == '.')
+        .collect();
+    (!value.is_empty()).then_some(value)
+}
+
+async fn tailscale_latest_version() -> Result<String> {
+    let api_result = fetch_update_text(TAILSCALE_RELEASES_URL).await.and_then(|text| {
+        serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|payload| {
+                payload
+                    .get("tag_name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .map(|value| value.trim_start_matches('v').to_owned())
+            .filter(|value| !value.is_empty())
+            .context("Tailscale release response did not contain a version")
+    });
+    match api_result {
+        Ok(version) => Ok(version),
+        Err(api_error) => fetch_update_text(TAILSCALE_RELEASES_PAGE_URL)
+            .await
+            .and_then(|page| {
+                extract_tailscale_page_version(&page).context("Tailscale release page did not contain a version")
+            })
+            .with_context(|| format!("Tailscale release lookup failed: {api_error}")),
+    }
+}
+
 async fn check_tailscale_update_snapshot(current: Option<&str>) -> ClientUpdateStatus {
     let checked_at = now();
-    let result: std::result::Result<String, String> = async {
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(4))
-            .timeout(Duration::from_secs(8))
-            .build()
-            .map_err(|error| error.to_string())?;
-        let response = client
-            .get(TAILSCALE_RELEASES_URL)
-            .header(reqwest::header::USER_AGENT, "clash-verge-rev")
-            .send()
-            .await
-            .map_err(|error| error.to_string())?
-            .error_for_status()
-            .map_err(|error| error.to_string())?;
-        let payload = response
-            .json::<serde_json::Value>()
-            .await
-            .map_err(|error| error.to_string())?;
-        payload
-            .get("tag_name")
-            .and_then(serde_json::Value::as_str)
-            .map(|value| value.trim_start_matches('v').to_string())
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| "Tailscale release response did not contain a version".to_string())
-    }
-    .await;
+    let result = tailscale_latest_version().await.map_err(|error| error.to_string());
     match result {
         Ok(latest_version) => ClientUpdateStatus {
             update_available: version_is_newer(current, Some(&latest_version)),
@@ -1110,48 +1238,20 @@ async fn check_tailscale_update_snapshot(current: Option<&str>) -> ClientUpdateS
 
 async fn check_cloudflare_update_snapshot(current: Option<&str>) -> ClientUpdateStatus {
     let checked_at = now();
-    let result: std::result::Result<String, String> = async {
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(4))
-            .timeout(Duration::from_secs(8))
-            .build()
-            .map_err(|error| error.to_string())?;
-        let response = client
-            .get(CLOUDFLARE_RELEASES_URL)
-            .header(reqwest::header::USER_AGENT, "clash-verge-rev")
-            .send()
-            .await
-            .map_err(|error| error.to_string())?
-            .error_for_status()
-            .map_err(|error| error.to_string())?;
-        extract_cloudflare_latest_version(&response.text().await.map_err(|error| error.to_string())?)
-            .ok_or_else(|| "Cloudflare One Client release page did not contain a version".to_string())
-    }
-    .await;
+    let result = fetch_update_text(CLOUDFLARE_RELEASES_URL)
+        .await
+        .and_then(|text| {
+            extract_cloudflare_latest_version(&text)
+                .context("Cloudflare One Client release page did not contain a version")
+        })
+        .map_err(|error| error.to_string());
     match result {
-        Ok(latest_version) => {
-            // warp-cli reports the client train (for example 2026.7.0),
-            // while Cloudflare's release page appends the build number. The
-            // year/train pair is the stable comparable portion across both.
-            let current_train = version_parts(current.unwrap_or_default())
-                .into_iter()
-                .take(2)
-                .map(|part| part.to_string())
-                .collect::<Vec<_>>()
-                .join(".");
-            let latest_train = version_parts(&latest_version)
-                .into_iter()
-                .take(2)
-                .map(|part| part.to_string())
-                .collect::<Vec<_>>()
-                .join(".");
-            ClientUpdateStatus {
-                update_available: !current_train.is_empty() && current_train != latest_train,
-                latest_version: Some(latest_version),
-                checked_at: Some(checked_at),
-                error: None,
-            }
-        }
+        Ok(latest_version) => ClientUpdateStatus {
+            update_available: version_is_newer(current, Some(&latest_version)),
+            latest_version: Some(latest_version),
+            checked_at: Some(checked_at),
+            error: None,
+        },
         Err(error) => ClientUpdateStatus {
             checked_at: Some(checked_at),
             error: Some(error),
@@ -1232,7 +1332,10 @@ async fn cloudflare_one_status_snapshot() -> CloudflareOneStatus {
             let lower = text.to_ascii_lowercase();
             result.running = output.status.success()
                 && !lower.contains("daemon is not running")
-                && !lower.contains("service is not running");
+                && !lower.contains("service is not running")
+                && !lower.contains("failed to connect to daemon")
+                && !lower.contains("unable to connect to daemon")
+                && !lower.contains("could not connect to daemon");
             if !output.status.success() && !text.trim().is_empty() {
                 result.error = Some(text.trim().to_string());
             }
@@ -1683,6 +1786,26 @@ pub async fn tailscale_netcheck() -> Result<TeamStatus> {
 /// Probe the Cloudflare One Client without requiring a team login.
 pub async fn cloudflare_one_status() -> Result<CloudflareOneStatus> {
     Ok(cloudflare_one_status_snapshot().await)
+}
+
+/// Start the locally installed Cloudflare One Client service without changing
+/// its connection state. The user can then explicitly connect it from the UI.
+pub async fn cloudflare_one_start() -> Result<TeamStatus> {
+    let snapshot = cloudflare_one_status_snapshot().await;
+    if !snapshot.installed {
+        bail!("Cloudflare One Client is not installed or is unavailable");
+    }
+    if snapshot.running {
+        return status().await;
+    }
+    start_cloudflare_service().await?;
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if cloudflare_one_status_snapshot().await.running {
+            return status().await;
+        }
+    }
+    bail!("Cloudflare One Client service did not become available after start")
 }
 
 pub async fn check_tailscale_update() -> Result<TeamStatus> {

@@ -67,6 +67,11 @@ pub async fn get_cloudflare_one_status() -> CmdResult<team::CloudflareOneStatus>
 }
 
 #[tauri::command]
+pub async fn start_cloudflare_one() -> CmdResult<team::TeamStatus> {
+    team::cloudflare_one_start().await.stringify_err()
+}
+
+#[tauri::command]
 pub async fn connect_cloudflare_one() -> CmdResult<team::TeamStatus> {
     team::connect_cloudflare_one().await.stringify_err()
 }

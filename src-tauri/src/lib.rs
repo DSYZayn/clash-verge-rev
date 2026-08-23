@@ -196,6 +196,7 @@ mod app_init {
             cmd::logout_tailscale,
             cmd::switch_tailscale_account,
             cmd::get_cloudflare_one_status,
+            cmd::start_cloudflare_one,
             cmd::connect_cloudflare_one,
             cmd::refresh_cloudflare_one,
             cmd::check_cloudflare_one_update,
