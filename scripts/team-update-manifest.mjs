@@ -33,7 +33,9 @@ for (const file of files) {
 if (Object.keys(platforms).length === 0) throw new Error('no updater artifacts found in ' + assetsDir)
 
 const manifest = {
-  name: version,
+  // Tauri's updater schema requires the candidate version under `version`.
+  // Keep this aligned with the version stamped into the Team Edition binary.
+  version,
   notes: 'Lab Clash Verge team build ' + version,
   pub_date: new Date().toISOString(),
   platforms,

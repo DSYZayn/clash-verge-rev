@@ -73,7 +73,8 @@ async function processRelease(github, options, tag, isAlpha) {
     })
 
     const updateData = {
-      name: tag.name,
+      // Tauri's updater schema uses `version`; `name` is not a version field.
+      version: tag.name,
       notes: await resolveUpdateLog(tag.name).catch(() =>
         resolveUpdateLogDefault().catch(() => 'No changelog available'),
       ),
