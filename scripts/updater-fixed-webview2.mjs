@@ -31,7 +31,8 @@ async function resolveUpdater() {
   })
 
   const updateData = {
-    name: tag.name,
+    // Tauri's updater schema uses `version`; `name` is not a version field.
+    version: tag.name,
     notes: await resolveUpdateLog(tag.name), // use Changelog.md
     pub_date: new Date().toISOString(),
     platforms: {

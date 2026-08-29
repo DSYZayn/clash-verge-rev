@@ -337,6 +337,6 @@ jobs:
           grep -Fxq 'update-proxy.json' release-assets.list
           mkdir -p release-verify
           gh release download team-latest --pattern update.json --dir release-verify --clobber
-          jq -e --arg expected "$TEAM_UPDATE_VERSION" '.name == $expected' release-verify/update.json >/dev/null
+          jq -e --arg expected "$TEAM_UPDATE_VERSION" '.version == $expected' release-verify/update.json >/dev/null
           echo 'rolling release assets:'
           cat release-assets.list
