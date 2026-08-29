@@ -39,11 +39,15 @@
         align-self: stretch;
         box-sizing: border-box;
 
-        img,
-        svg {
-          width: 100%;
-          height: 100%;
-          pointer-events: none;
+        // Only the logo row should stretch its SVG; the update icon has its
+        // own intrinsic size and must not inherit the logo dimensions.
+        > div:first-child {
+          img,
+          svg {
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+          }
         }
 
         .the-newbtn {
@@ -51,8 +55,17 @@
           right: 10px;
           top: 15px;
           border-radius: 8px;
-          padding: 2px 4px;
-          transform: scale(0.8);
+          width: 28px;
+          height: 28px;
+          min-width: 28px;
+          min-height: 28px;
+          padding: 2px;
+          box-sizing: border-box;
+
+          .MuiSvgIcon-root {
+            width: 20px;
+            height: 20px;
+          }
         }
       }
 

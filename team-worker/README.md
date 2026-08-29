@@ -82,9 +82,10 @@ Clash 配置发给桌面端。真实订阅 URL 只存在于 Worker Secret，客�
   URL 路径编码；不要填写 `https://` 或其他 URL 前缀，也不要填写带后缀的完整 API URL。
   旧版配置中使用的 Tailnet DNS 名称/组织域名仍可作为 API 的兼容标识，但新配置应优先使用
   Tailnet ID。
-- Tailscale OAuth token 请求会按操作场景发送 `auth_keys` 或 `devices:core`，并带上
-  `tag:team-user` 或 `tag:team-admin`；两个 tag 都必须在 OAuth client 的授权范围内。
-  另外，client 同时持有两个 tag 而每次只申请其中一个属于"子集申请"：Tailscale 要求
+- Tailscale OAuth token 请求会按操作场景发送 `auth_keys` 或 `devices:core`：前者使用
+  当前角色 tag，后者会同时带上 `tag:team-user`、`tag:team-admin`（设备修复时也会保留
+  D1 中记录的旧 tag）；因此两个 tag 都必须在 OAuth client 的授权范围内。另外，client
+  同时持有两个 tag 而每次只申请其中一个属于"子集申请"：Tailscale 要求
   被申请的 tag 在策略文件 `tagOwners` 中由 client 持有的某个 tag 所拥有，否则 token
   端点返回 400 `requested tags ... are invalid or not permitted`。标准做法是让每个
   tag 拥有自身：`"tag:team-user": ["autogroup:member", "tag:team-user"]`、
@@ -132,7 +133,7 @@ login`，并把 `.env.example` 复制为 `.env` 填好（`.env` 已被 git 忽�
 | `GET /v1/desktop/profile` | Access JWT（首登自动建档） | 受管 Clash YAML（ETag/304） |
 | `PUT /v1/admin/resource` | `ADMIN_API_TOKEN`（Bearer；仅资源推送，不授予管理员权限） | 推送受管配置内容（推送模式） |
 | `GET /admin` | Access JWT（`ADMIN_EMAIL` 或 `ADMIN_EMAIL_<num>`） | Tailscale 管理页面 |
-| `/v1/admin/users/*`、`/v1/admin/devices/*` | Access JWT（`ADMIN_EMAIL` 或 `ADMIN_EMAIL_<num>`） | 用户角色与设备管理 |
+| `/v1/admin/users/*`、`/v1/admin/devices/*` | Access JWT（`ADMIN_EMAIL` 或 `ADMIN_EMAIL_<num>`） | 用户角色与设备管理；`DELETE /v1/admin/devices/offline` 可一键清理所有离线设备 |
 | `/v1/desktop/tailscale/*` | Access JWT | 桌面端 Tailscale key、设备登记与退出 |
 
 桌面端请求 `POST /v1/desktop/tailscale/key` 时可携带 `deviceId` 和 `hostname`；Worker
@@ -143,6 +144,11 @@ login`，并把 `.env.example` 复制为 `.env` 填好（`.env` 已被 git 忽�
 最新密钥的 `issuedAt`、`expiresAt`、`role`、`tag`（以及可用时的 `used`/`revoked` 状态）；
 SHA-256 摘要仅保存在数据库中，管理员 API 和页面都不会返回或展示它。绝不会返回或持久化
 auth key 原文。需要再次使用时必须重新生成一次性 key。
+
+管理员调整角色时，Worker 会用 `devices:core` 更新已登记节点的实际 Tag，客户端下次
+reconcile 也会用旧、新 Tag 重试未完成的同步；历史版本留下的设备记录会在首次成功
+reconcile 时自动补偿一次。auth key 是一次性入网凭据，签发后的 Tag 不在原 key 上修改；
+角色变更作用于已登记的 Tailscale 节点。
 
 auth key 的有效期由 Worker 严格强制：`POST /v1/desktop/tailscale/key` 可携带可选的
 `expirySeconds`，未提供时使用 `DEFAULT_TAILSCALE_KEY_EXPIRY_SECONDS`（缺省 7 天）。

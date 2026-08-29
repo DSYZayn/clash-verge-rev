@@ -163,6 +163,8 @@ async function healUsersTable(env: Env) {
     ['revoked_at', 'INTEGER'],
     ['created_at', 'TEXT'],
     ['updated_at', 'TEXT'],
+    // Zero marks legacy rows for one compensating upstream Tag sync.
+    ['tag_sync_version', 'INTEGER NOT NULL DEFAULT 0'],
   ])
 }
 
@@ -672,6 +674,7 @@ const ONLINE_WINDOW_SECONDS = 600
 const TAILSCALE_KEY_DEFAULT_EXPIRY_SECONDS = 7 * 86400
 const TAILSCALE_KEY_MIN_EXPIRY_SECONDS = 86400
 const TAILSCALE_KEY_MAX_EXPIRY_SECONDS = 90 * 86400
+const TAILSCALE_TAG_SYNC_VERSION = 1
 
 const TAILSCALE_API = 'https://api.tailscale.com/api/v2'
 
@@ -800,9 +803,34 @@ function tailscaleTag(role: 'user' | 'admin') {
   return role === 'admin' ? 'tag:team-admin' : 'tag:team-user'
 }
 
-async function ensureTailscaleDeviceKeyExpiry(env: Env, nodeId: string, tag: string) {
+// A role transition needs an OAuth token that can see both the old and new
+// device tags. The old tag remains on the node until the API update succeeds.
+function mergeTailscaleTags(tags: Array<string | null | undefined>) {
+  return [
+    ...new Set(
+      tags
+        .map((tag) => (typeof tag === 'string' ? tag.trim() : ''))
+        .filter(Boolean),
+    ),
+  ]
+}
+
+async function ensureTailscaleDeviceKeyExpiry(
+  env: Env,
+  nodeId: string,
+  tag: string,
+  authorizationTags: string[] = [tag],
+) {
+  // Include both managed role tags so a stale D1 row can still authorize a
+  // repair of the node's real upstream tag.
+  const tokenTags = mergeTailscaleTags([
+    ...authorizationTags,
+    tag,
+    tailscaleTag('user'),
+    tailscaleTag('admin'),
+  ])
   const encodedNodeId = encodeURIComponent(nodeId)
-  await tailscaleRequest(env, `/device/${encodedNodeId}/key`, 'devices:core', [tag], {
+  await tailscaleRequest(env, `/device/${encodedNodeId}/key`, 'devices:core', tokenTags, {
     method: 'POST',
     body: JSON.stringify({ keyExpiryDisabled: false }),
   })
@@ -810,7 +838,7 @@ async function ensureTailscaleDeviceKeyExpiry(env: Env, nodeId: string, tag: str
     env,
     `/device/${encodedNodeId}?fields=default`,
     'devices:core',
-    [tag],
+    tokenTags,
   )
   const expiresAt = device.expires ? Date.parse(device.expires) : NaN
   if (device.keyExpiryDisabled || !Number.isFinite(expiresAt) || expiresAt <= Date.now())
@@ -826,8 +854,19 @@ function parseJsonBody(request: Request) {
   return request.json().catch(() => { throw new Response('Invalid JSON body', { status: 400 }) }) as Promise<Record<string, unknown>>
 }
 
-async function syncDeviceTag(env: Env, nodeId: string, tag: string) {
-  return tailscaleRequest(env, `/device/${encodeURIComponent(nodeId)}/tags`, 'devices:core', [tag], {
+async function syncDeviceTag(
+  env: Env,
+  nodeId: string,
+  tag: string,
+  authorizationTags: string[] = [tag],
+) {
+  const tokenTags = mergeTailscaleTags([
+    ...authorizationTags,
+    tag,
+    tailscaleTag('user'),
+    tailscaleTag('admin'),
+  ])
+  return tailscaleRequest(env, `/device/${encodeURIComponent(nodeId)}/tags`, 'devices:core', tokenTags, {
     method: 'POST',
     body: JSON.stringify({ tags: [tag] }),
   })
@@ -886,8 +925,14 @@ async function handleDesktopTailscale(request: Request, env: Env, user: UserRow)
     const hostname = typeof body.hostname === 'string' ? body.hostname.slice(0, 255) : null
     const teamDeviceId = typeof body.deviceId === 'string' ? body.deviceId.slice(0, 64) : null
     const existing = await env.TEAM_DB.prepare(
-      'SELECT access_subject, revoked_at FROM tailscale_devices WHERE node_id = ?1',
-    ).bind(nodeId).first<{ access_subject: string; revoked_at: number | null }>()
+      'SELECT access_subject, revoked_at, role, tag, tag_sync_version FROM tailscale_devices WHERE node_id = ?1',
+    ).bind(nodeId).first<{
+      access_subject: string
+      revoked_at: number | null
+      role: 'user' | 'admin' | null
+      tag: string | null
+      tag_sync_version: number | null
+    }>()
     if (existing && existing.access_subject !== user.access_subject)
       return json({ error: 'Tailscale device belongs to another account' }, 403)
     if (existing?.revoked_at !== null && existing?.revoked_at !== undefined)
@@ -902,12 +947,34 @@ async function handleDesktopTailscale(request: Request, env: Env, user: UserRow)
       if (issuance?.revokedAt !== null && issuance?.revokedAt !== undefined)
         return json({ error: 'The Tailscale device authorization has been revoked; reconnect is required' }, 410)
     }
-    await ensureTailscaleDeviceKeyExpiry(env, nodeId, tag)
-    await env.TEAM_DB.prepare(
-      `INSERT INTO tailscale_devices (node_id, access_subject, team_device_id, hostname, ipv4, ipv6, role, tag, online, last_seen)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9)
-       ON CONFLICT(node_id) DO UPDATE SET access_subject=?2, team_device_id=?3, hostname=?4, ipv4=?5, ipv6=?6, role=?7, tag=?8, online=1, last_seen=?9, updated_at=CURRENT_TIMESTAMP, revoked_at=NULL`,
-    ).bind(nodeId, user.access_subject, teamDeviceId, hostname, addresses[0] ?? null, addresses[1] ?? null, role, tag, Math.floor(Date.now() / 1000)).run()
+    const previousTag =
+      existing?.tag?.trim() ||
+      (existing?.role === 'admin' || existing?.role === 'user'
+        ? tailscaleTag(existing.role)
+        : null)
+    const authorizationTags = mergeTailscaleTags([previousTag, tag])
+    const needsTagSync =
+      !existing ||
+      !existing.tag?.trim() ||
+      Number(existing.tag_sync_version) !== TAILSCALE_TAG_SYNC_VERSION ||
+      previousTag !== tag
+    if (needsTagSync)
+      await syncDeviceTag(env, nodeId, tag, authorizationTags)
+    await ensureTailscaleDeviceKeyExpiry(env, nodeId, tag, authorizationTags)
+    const upsert = await env.TEAM_DB.prepare(
+      `INSERT INTO tailscale_devices (node_id, access_subject, team_device_id, hostname, ipv4, ipv6, role, tag, online, last_seen, tag_sync_version)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?10)
+       ON CONFLICT(node_id) DO UPDATE SET access_subject=?2, team_device_id=?3, hostname=?4, ipv4=?5, ipv6=?6, role=?7, tag=?8, online=1, last_seen=?9, tag_sync_version=?10, updated_at=CURRENT_TIMESTAMP, revoked_at=NULL
+       WHERE tailscale_devices.revoked_at IS NULL`,
+    ).bind(nodeId, user.access_subject, teamDeviceId, hostname, addresses[0] ?? null, addresses[1] ?? null, role, tag, Math.floor(Date.now() / 1000), TAILSCALE_TAG_SYNC_VERSION).run()
+    if (Number(upsert.meta.changes) !== 1) {
+      const revoked = await env.TEAM_DB.prepare(
+        'SELECT revoked_at FROM tailscale_devices WHERE node_id=?1',
+      ).bind(nodeId).first<{ revoked_at: number | null }>()
+      if (revoked?.revoked_at !== null && revoked?.revoked_at !== undefined)
+        return json({ error: 'Tailscale device access has been revoked; reconnect is required' }, 410)
+      throw new Response('Tailscale device registration was not applied', { status: 409 })
+    }
     // Auth keys are one-time credentials. Once the client reconciles its
     // device, retain only the non-recoverable issuance metadata and mark the
     // newest matching issuance as used.
@@ -1100,7 +1167,10 @@ async function handleAdminUsers(request: Request, env: Env, identity: JWTPayload
           : null,
       }
     }))
-    return json({ users })
+    const offlineCount = await env.TEAM_DB.prepare(
+      'SELECT COUNT(*) AS n FROM tailscale_devices WHERE online=0 AND revoked_at IS NULL',
+    ).first<{ n: number }>()
+    return json({ users, offlineDeviceCount: Number(offlineCount?.n ?? 0) })
   }
   if (request.method === 'POST' && url.pathname.endsWith('/sync-casdoor')) {
     const body = await parseJsonBody(request).catch(() => ({} as Record<string, unknown>))
@@ -1117,34 +1187,183 @@ async function handleAdminUsers(request: Request, env: Env, identity: JWTPayload
     const displayName = typeof body.displayName === 'string' ? body.displayName.trim() : undefined
     const row = await env.TEAM_DB.prepare('SELECT access_subject, email, display_name, team_name, enabled, quota_upload, quota_download, quota_total, quota_expire, COALESCE(tailscale_role,\'user\') AS tailscale_role FROM users WHERE access_subject=?1').bind(subject).first<UserRow>()
     if (!row) return json({ error: 'User not found' }, 404)
-    if (role && role !== row.tailscale_role) {
-      await env.TEAM_DB.prepare('UPDATE users SET tailscale_role=?1, updated_at=CURRENT_TIMESTAMP WHERE access_subject=?2').bind(role, subject).run()
+    let synced = 0
+    let updatedDevices = 0
+    const syncErrors: string[] = []
+    if (role) {
       const tag = tailscaleTag(role)
-      // Keep the local device view authoritative even when an individual
-      // Tailscale API update is unavailable. The API sync below is best effort;
-      // subsequent admin reads and revocations must still use the new role/tag.
-      await env.TEAM_DB.prepare(
-        'UPDATE tailscale_devices SET role=?1, tag=?2, updated_at=CURRENT_TIMESTAMP WHERE access_subject=?3',
-      ).bind(role, tag, subject).run()
-      const devices = await env.TEAM_DB.prepare('SELECT node_id FROM tailscale_devices WHERE access_subject=?1 AND revoked_at IS NULL').bind(subject).all<{ node_id: string }>()
-      for (const device of devices.results) {
-        try { await syncDeviceTag(env, device.node_id, tag) } catch (error) { console.error('failed to sync tag on role change:', describeError(error)) }
+      const roleChanged = role !== row.tailscale_role
+      if (roleChanged) {
+        await env.TEAM_DB.prepare('UPDATE users SET tailscale_role=?1, updated_at=CURRENT_TIMESTAMP WHERE access_subject=?2').bind(role, subject).run()
       }
-      await audit(env, currentUser, `tailscale_role_changed:${role}`)
+
+      // Keep the previous tag until Tailscale confirms the replacement. This
+      // makes a failed upstream update visible and retryable instead of only
+      // changing the label stored in D1.
+      const devices = await env.TEAM_DB.prepare(
+        'SELECT node_id, role, tag, tag_sync_version FROM tailscale_devices WHERE access_subject=?1 AND revoked_at IS NULL',
+      ).bind(subject).all<{
+        node_id: string
+        role: 'user' | 'admin' | null
+        tag: string | null
+        tag_sync_version: number | null
+      }>()
+      for (const device of devices.results) {
+        const previousTag =
+          device.tag?.trim() ||
+          (device.role === 'admin' || device.role === 'user'
+            ? tailscaleTag(device.role)
+            : row.tailscale_role
+              ? tailscaleTag(row.tailscale_role)
+              : null)
+        const needsTagSync =
+          !device.tag?.trim() ||
+          Number(device.tag_sync_version) !== TAILSCALE_TAG_SYNC_VERSION ||
+          device.role !== role ||
+          previousTag !== tag
+        if (!needsTagSync) {
+          synced++
+          continue
+        }
+        try {
+          await syncDeviceTag(
+            env,
+            device.node_id,
+            tag,
+            mergeTailscaleTags([previousTag, tag]),
+          )
+          await env.TEAM_DB.prepare(
+            'UPDATE tailscale_devices SET role=?1, tag=?2, tag_sync_version=?3, updated_at=CURRENT_TIMESTAMP WHERE node_id=?4 AND access_subject=?5 AND revoked_at IS NULL',
+          ).bind(role, tag, TAILSCALE_TAG_SYNC_VERSION, device.node_id, subject).run()
+          updatedDevices++
+          synced++
+        } catch (error) {
+          syncErrors.push(`device ${device.node_id}: Tailscale tag update failed`)
+          console.error('failed to sync tag on role change:', describeError(error))
+        }
+      }
+      if (roleChanged || updatedDevices > 0)
+        await audit(env, currentUser, `tailscale_role_changed:${role}`)
     }
     if (displayName !== undefined && displayName !== row.display_name) {
       await env.TEAM_DB.prepare('UPDATE users SET display_name=?1, updated_at=CURRENT_TIMESTAMP WHERE access_subject=?2').bind(displayName || null, subject).run()
       await audit(env, currentUser, `display_name_updated:${displayName}`)
     }
-    return json({ ok: true })
+    if (syncErrors.length > 0) {
+      const targetRole = role ?? row.tailscale_role
+      return json(
+        {
+          ok: false,
+          error: '部分设备的 Tailscale Tag 同步失败，请稍后重试',
+          role: targetRole,
+          tag: tailscaleTag(targetRole),
+          synced,
+          errors: syncErrors,
+        },
+        502,
+      )
+    }
+    return json({ ok: true, synced })
+  }
+  if (request.method === 'DELETE' && url.pathname === '/v1/admin/devices/offline') {
+    type OfflineDevice = {
+      node_id: string
+      access_subject: string
+      team_device_id: string | null
+      role: 'user' | 'admin'
+      tag: string | null
+    }
+    const devices = await env.TEAM_DB.prepare(
+      `SELECT node_id, access_subject, team_device_id, role, tag
+         FROM tailscale_devices
+        WHERE online = 0 AND revoked_at IS NULL
+        ORDER BY updated_at ASC`,
+    ).all<OfflineDevice>()
+    const now = Math.floor(Date.now() / 1000)
+    const claimed: OfflineDevice[] = []
+
+    // Claim only rows that are still offline. The tombstone prevents a client
+    // from reconnecting while the upstream deletion is in progress.
+    for (const device of devices.results) {
+      const result = await env.TEAM_DB.prepare(
+        'UPDATE tailscale_devices SET online=0, revoked_at=COALESCE(revoked_at, ?1), updated_at=CURRENT_TIMESTAMP WHERE node_id=?2 AND online=0 AND revoked_at IS NULL',
+      ).bind(now, device.node_id).run()
+      if (Number(result.meta.changes) === 1) claimed.push(device)
+    }
+
+    let apiFailures = 0
+    for (const device of claimed) {
+      try {
+        await tailscaleRequest(
+          env,
+          `/device/${encodeURIComponent(device.node_id)}`,
+          'devices:core',
+          mergeTailscaleTags([
+            device.tag,
+            tailscaleTag(device.role === 'admin' ? 'admin' : 'user'),
+            tailscaleTag('user'),
+            tailscaleTag('admin'),
+          ]),
+          { method: 'DELETE' },
+        )
+      } catch (error) {
+        // Local tombstones still make the cleanup useful when the upstream
+        // node was already removed or the API is temporarily unavailable.
+        apiFailures++
+        console.warn(
+          `Tailscale API delete offline device ${device.node_id} failed:`,
+          describeError(error),
+        )
+      }
+    }
+
+    const teamDevices = new Map<string, { accessSubject: string; teamDeviceId: string }>()
+    for (const device of claimed) {
+      if (device.team_device_id) {
+        teamDevices.set(`${device.access_subject}\u0000${device.team_device_id}`, {
+          accessSubject: device.access_subject,
+          teamDeviceId: device.team_device_id,
+        })
+      }
+    }
+    for (const { accessSubject, teamDeviceId } of teamDevices.values()) {
+      const remainingDevice = await env.TEAM_DB.prepare(
+        `SELECT 1 FROM tailscale_devices
+          WHERE access_subject=?1 AND team_device_id=?2 AND revoked_at IS NULL
+          LIMIT 1`,
+      ).bind(accessSubject, teamDeviceId).first()
+      if (!remainingDevice) {
+        await env.TEAM_DB.prepare(
+          `UPDATE tailscale_key_issuances
+              SET revoked_at=COALESCE(revoked_at, ?1)
+            WHERE access_subject=?2 AND team_device_id=?3
+              AND used_at IS NOT NULL`,
+        ).bind(now, accessSubject, teamDeviceId).run()
+      }
+    }
+
+    if (claimed.length > 0)
+      await audit(env, currentUser, `tailscale_offline_devices_cleared:${claimed.length}`)
+    return json({ ok: true, removed: claimed.length, apiFailures })
   }
   const revokeMatch = url.pathname.match(/^\/v1\/admin\/devices\/([^/]+)$/)
   if (request.method === 'DELETE' && revokeMatch) {
     const nodeId = decodeURIComponent(revokeMatch[1])
-    const device = await env.TEAM_DB.prepare('SELECT node_id, access_subject, team_device_id, role FROM tailscale_devices WHERE node_id=?1').bind(nodeId).first<{ node_id: string; access_subject: string; team_device_id: string | null; role: 'user' | 'admin' }>()
+    const device = await env.TEAM_DB.prepare('SELECT node_id, access_subject, team_device_id, role, tag FROM tailscale_devices WHERE node_id=?1').bind(nodeId).first<{ node_id: string; access_subject: string; team_device_id: string | null; role: 'user' | 'admin'; tag: string | null }>()
     if (device) {
       try {
-        await tailscaleRequest(env, `/device/${encodeURIComponent(nodeId)}`, 'devices:core', [tailscaleTag(device.role === 'admin' ? 'admin' : 'user')], { method: 'DELETE' })
+        await tailscaleRequest(
+          env,
+          `/device/${encodeURIComponent(nodeId)}`,
+          'devices:core',
+          mergeTailscaleTags([
+            device.tag,
+            tailscaleTag(device.role === 'admin' ? 'admin' : 'user'),
+            tailscaleTag('user'),
+            tailscaleTag('admin'),
+          ]),
+          { method: 'DELETE' },
+        )
       } catch (error) {
         console.warn(`Tailscale API delete device ${nodeId} failed:`, describeError(error))
       }
