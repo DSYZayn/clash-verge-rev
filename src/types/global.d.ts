@@ -353,6 +353,10 @@ interface ICloudflareOneStatus {
   clashTunLocation?: string
   /** Explicit comparison result from the backend, when available. */
   locationMatch?: boolean
+  /** Location observed through the local network before WARP connected. */
+  localNetworkLocation?: string
+  /** Whether the WARP exit country matches the local-network location. */
+  localLocationMatch?: boolean
   checkedAt?: number
   lastCheckedAt?: number
   error?: string

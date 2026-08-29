@@ -39,6 +39,31 @@ interface Env {
   CASDOOR_ORGANIZATION?: string
 }
 
+// Keep the original ADMIN_EMAIL binding working while allowing an arbitrary
+// number of additional administrators (ADMIN_EMAIL_1, ADMIN_EMAIL_2, ...).
+// Cloudflare exposes dashboard variables as enumerable properties on `env`,
+// so discovering the numbered bindings avoids imposing an artificial limit.
+const ADMIN_EMAIL_KEY = /^ADMIN_EMAIL(?:_\d+)?$/i
+
+function configuredAdminEmails(env: Env): string[] {
+  const values: string[] = []
+  const bindings = env as unknown as Record<string, unknown>
+  for (const [key, value] of Object.entries(bindings)) {
+    if (!ADMIN_EMAIL_KEY.test(key) || typeof value !== 'string') continue
+    const email = value.trim()
+    if (email) values.push(email)
+  }
+
+  // Keep the legacy binding explicit as a fallback for runtimes that expose
+  // bindings through a proxy without enumerable keys.
+  if (typeof env.ADMIN_EMAIL === 'string') {
+    const email = env.ADMIN_EMAIL.trim()
+    if (email) values.push(email)
+  }
+
+  return [...new Set(values.map((email) => email.toLowerCase()))]
+}
+
 interface UserRow {
   access_subject: string
   email: string | null
@@ -924,10 +949,11 @@ async function handleDesktopTailscale(request: Request, env: Env, user: UserRow)
 }
 
 async function requireAdmin(identity: JWTPayload, env: Env) {
-  if (!env.ADMIN_EMAIL?.trim())
+  const adminEmails = configuredAdminEmails(env)
+  if (adminEmails.length === 0)
     throw new Response('ADMIN_EMAIL is not configured', { status: 503 })
   const email = typeof identity.email === 'string' ? identity.email.trim() : ''
-  if (email.toLowerCase() !== env.ADMIN_EMAIL.trim().toLowerCase())
+  if (!adminEmails.includes(email.toLowerCase()))
     throw new Response('Administrator access required', { status: 403 })
 }
 
@@ -1094,6 +1120,12 @@ async function handleAdminUsers(request: Request, env: Env, identity: JWTPayload
     if (role && role !== row.tailscale_role) {
       await env.TEAM_DB.prepare('UPDATE users SET tailscale_role=?1, updated_at=CURRENT_TIMESTAMP WHERE access_subject=?2').bind(role, subject).run()
       const tag = tailscaleTag(role)
+      // Keep the local device view authoritative even when an individual
+      // Tailscale API update is unavailable. The API sync below is best effort;
+      // subsequent admin reads and revocations must still use the new role/tag.
+      await env.TEAM_DB.prepare(
+        'UPDATE tailscale_devices SET role=?1, tag=?2, updated_at=CURRENT_TIMESTAMP WHERE access_subject=?3',
+      ).bind(role, tag, subject).run()
       const devices = await env.TEAM_DB.prepare('SELECT node_id FROM tailscale_devices WHERE access_subject=?1 AND revoked_at IS NULL').bind(subject).all<{ node_id: string }>()
       for (const device of devices.results) {
         try { await syncDeviceTag(env, device.node_id, tag) } catch (error) { console.error('failed to sync tag on role change:', describeError(error)) }

@@ -128,6 +128,8 @@ const TeamPage = () => {
     queryKey: ['getTeamStatus'],
     queryFn: getTeamStatus,
     refetchOnWindowFocus: false,
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
   })
   const [action, setAction] = useState<string>()
   const [error, setError] = useState<string>()
@@ -250,6 +252,9 @@ const TeamPage = () => {
   const cloudflareOne =
     data?.cloudflareOne ?? data?.cloudflareOneClient ?? data?.cloudflare
   const cloudflareLocationMatch = cloudflareOne?.locationMatch
+  const cloudflareLocalLocationMatch = cloudflareOne?.localLocationMatch
+  const cloudflareLocationVerified =
+    cloudflareLocationMatch === true || cloudflareLocalLocationMatch === true
   const tailscaleDate = (value?: number) =>
     value ? dayjs(value * 1000).format('YYYY-MM-DD HH:mm') : '未提供'
 
@@ -839,6 +844,11 @@ const TeamPage = () => {
                       Clash TUN 节点位置：{cloudflareOne.clashTunLocation}
                     </Typography>
                   )}
+                  {cloudflareOne.localNetworkLocation && (
+                    <Typography variant="body2" color="text.secondary">
+                      本机网络位置：{cloudflareOne.localNetworkLocation}
+                    </Typography>
+                  )}
                 </Stack>
               </>
             )}
@@ -937,22 +947,58 @@ const TeamPage = () => {
             </Stack>
 
             {cloudflareOne?.connected &&
-              cloudflareLocationMatch !== undefined && (
-                <Alert
-                  severity={cloudflareLocationMatch ? 'success' : 'error'}
-                  icon={
-                    cloudflareLocationMatch ? (
-                      <CheckCircleOutlineOutlinedIcon fontSize="inherit" />
-                    ) : (
-                      <ErrorOutlineOutlinedIcon fontSize="inherit" />
-                    )
-                  }
-                  sx={{ mt: 2 }}
-                >
-                  {cloudflareLocationMatch
-                    ? '出口节点与 Clash TUN 节点位置一致，连接验证成功。'
-                    : '出口节点与 Clash TUN 节点位置不一致，请检查 TUN、节点选择和 Cloudflare One Client 路由。'}
-                </Alert>
+              (cloudflareLocationMatch !== undefined ||
+                cloudflareLocalLocationMatch !== undefined) && (
+                <Stack spacing={1} sx={{ mt: 2 }}>
+                  <Alert
+                    severity={cloudflareLocationVerified ? 'success' : 'error'}
+                    icon={
+                      cloudflareLocationVerified ? (
+                        <CheckCircleOutlineOutlinedIcon fontSize="inherit" />
+                      ) : (
+                        <ErrorOutlineOutlinedIcon fontSize="inherit" />
+                      )
+                    }
+                  >
+                    {cloudflareLocationVerified
+                      ? '出口节点位置校验通过（Clash TUN 或本机网络至少一项匹配）。'
+                      : '出口节点位置校验未通过，请检查 TUN、节点选择和 Cloudflare One Client 路由。'}
+                  </Alert>
+                  {cloudflareLocationMatch !== undefined && (
+                    <Alert
+                      severity={cloudflareLocationMatch ? 'success' : 'error'}
+                      icon={
+                        cloudflareLocationMatch ? (
+                          <CheckCircleOutlineOutlinedIcon fontSize="inherit" />
+                        ) : (
+                          <ErrorOutlineOutlinedIcon fontSize="inherit" />
+                        )
+                      }
+                    >
+                      {cloudflareLocationMatch
+                        ? 'Clash TUN 节点与 Cloudflare 出口位置一致。'
+                        : 'Clash TUN 节点与 Cloudflare 出口位置不一致。'}
+                    </Alert>
+                  )}
+                  {cloudflareLocalLocationMatch !== undefined && (
+                    <Alert
+                      severity={
+                        cloudflareLocalLocationMatch ? 'success' : 'error'
+                      }
+                      icon={
+                        cloudflareLocalLocationMatch ? (
+                          <CheckCircleOutlineOutlinedIcon fontSize="inherit" />
+                        ) : (
+                          <ErrorOutlineOutlinedIcon fontSize="inherit" />
+                        )
+                      }
+                    >
+                      {cloudflareLocalLocationMatch
+                        ? '本机网络与 Cloudflare 出口位置一致。'
+                        : '本机网络与 Cloudflare 出口位置不一致。'}
+                    </Alert>
+                  )}
+                </Stack>
               )}
 
             <Divider sx={{ my: 2 }} />
@@ -1100,7 +1146,7 @@ const TeamPage = () => {
                 ? '状态接口暂未返回 Cloudflare One Client 信息。'
                 : !cloudflareOne.installed
                   ? '请从 Cloudflare 官方页面下载并安装 Cloudflare One Client。'
-                  : '连接后点击“检测出口”，确认出口节点与 Clash TUN 节点位置一致。'}
+                  : '连接后点击“检测出口”，确认出口节点与 Clash TUN 节点或本机网络位置一致。'}
             </Typography>
           </CardContent>
         </Card>

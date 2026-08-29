@@ -55,7 +55,7 @@ Clash 配置发给桌面端。真实订阅 URL 只存在于 Worker Secret，客�
    | `DEFAULT_TEAM_NAME` | Text（可选） | 团队显示名；不填用代码默认值 |
    | `CACHE_TTL_SECONDS` | Text（可选） | KV 缓存秒数；不填默认 300 |
    | `ADMIN_API_TOKEN` | Secret 2/4（推送模式可选） | 住宅 runner 推送配置用的长随机令牌；不授予 `/admin` 或用户管理权限 |
-   | `ADMIN_EMAIL` | Text（唯一管理员入口） | 唯一允许访问 `/admin` 和 `/v1/admin/*` 的 Access 身份邮箱；未设置时管理员接口停用 |
+   | `ADMIN_EMAIL` | Text（管理员入口） | 允许访问 `/admin` 和 `/v1/admin/*` 的 Access 身份邮箱；可继续使用此旧变量，并按需增加 `ADMIN_EMAIL_1`、`ADMIN_EMAIL_2` 等变量；未设置任何管理员邮箱时管理员接口停用 |
    | `TAILSCALE_TAILNET` | Text | Tailscale Tailnet ID；不要填写 `https://`，也不要改写或拼接域名 |
    | `TAILSCALE_OAUTH_CLIENT_ID` | Secret 3/4 | Tailscale OAuth client ID；需授权 `auth_keys`、`devices:core` 及 `tag:team-user`、`tag:team-admin` |
    | `TAILSCALE_OAUTH_CLIENT_SECRET` | Secret 4/4 | Tailscale OAuth client secret |
@@ -89,12 +89,13 @@ Clash 配置发给桌面端。真实订阅 URL 只存在于 Worker Secret，客�
   端点返回 400 `requested tags ... are invalid or not permitted`。标准做法是让每个
   tag 拥有自身：`"tag:team-user": ["autogroup:member", "tag:team-user"]`、
   `"tag:team-admin": ["autogroup:admin", "tag:team-admin"]`。
-- `/admin` 与 `/v1/admin/*` 只接受 Access JWT 中与 `ADMIN_EMAIL` 完全匹配（不区分大小写）
-  的邮箱；D1 的 `tailscale_role` 只用于 Tailscale tag，不构成管理后台权限。
+- `/admin` 与 `/v1/admin/*` 只接受 Access JWT 中与 `ADMIN_EMAIL` 或任一
+  `ADMIN_EMAIL_<num>` 完全匹配（不区分大小写）的邮箱；D1 的 `tailscale_role` 只用于
+  Tailscale tag，不构成管理后台权限。旧版只配置 `ADMIN_EMAIL` 的部署无需调整。
 - Tailscale 前置操作：在 Tailscale Admin Console 的 OAuth clients 中创建 client，开启
   `auth_keys` 与 `devices:core` scope，并允许 `tag:team-user`、`tag:team-admin`；在
-  **Access → Applications** 中保护 Worker 的自定义域名，确认 `ADMIN_EMAIL` 对应的邮箱
-  能通过 Access。桌面端只接收一次性、非复用、ephemeral、preauthorized key，key 原文
+  **Access → Applications** 中保护 Worker 的自定义域名，确认每个配置的管理员邮箱
+  （`ADMIN_EMAIL` 或 `ADMIN_EMAIL_<num>`）都能通过 Access。桌面端只接收一次性、非复用、ephemeral、preauthorized key，key 原文
   不写入 D1 或日志。
 - 兜底：`docs/team-deployment.zh-CN.md` 里的 **Deploy Team Worker** Action 使用
   `team-production` Environment 中的 `CLOUDFLARE_API_TOKEN` 等资源 id 变量，
@@ -130,8 +131,8 @@ login`，并把 `.env.example` 复制为 `.env` 填好（`.env` 已被 git 忽�
 | `GET /v1/desktop/account` | Access JWT（首登自动建档） | 账户与额度信息 |
 | `GET /v1/desktop/profile` | Access JWT（首登自动建档） | 受管 Clash YAML（ETag/304） |
 | `PUT /v1/admin/resource` | `ADMIN_API_TOKEN`（Bearer；仅资源推送，不授予管理员权限） | 推送受管配置内容（推送模式） |
-| `GET /admin` | Access JWT（仅 `ADMIN_EMAIL`） | Tailscale 管理页面 |
-| `/v1/admin/users/*`、`/v1/admin/devices/*` | Access JWT（仅 `ADMIN_EMAIL`） | 用户角色与设备管理 |
+| `GET /admin` | Access JWT（`ADMIN_EMAIL` 或 `ADMIN_EMAIL_<num>`） | Tailscale 管理页面 |
+| `/v1/admin/users/*`、`/v1/admin/devices/*` | Access JWT（`ADMIN_EMAIL` 或 `ADMIN_EMAIL_<num>`） | 用户角色与设备管理 |
 | `/v1/desktop/tailscale/*` | Access JWT | 桌面端 Tailscale key、设备登记与退出 |
 
 桌面端请求 `POST /v1/desktop/tailscale/key` 时可携带 `deviceId` 和 `hostname`；Worker

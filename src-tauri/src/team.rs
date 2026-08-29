@@ -42,13 +42,51 @@ const TAILSCALE_RECONCILE_PATH: &str = "/v1/desktop/tailscale/reconcile";
 const TAILSCALE_VALIDATE_PATH: &str = "/v1/desktop/tailscale/validate";
 const TAILSCALE_LOGOUT_PATH: &str = "/v1/desktop/tailscale/logout";
 const TAILSCALE_KEY_EXPIRY_SECONDS: u64 = 7 * 24 * 60 * 60;
+/// Tailscale CLI calls normally complete in a few hundred milliseconds. A
+/// stopped or wedged daemon can otherwise leave the UI waiting indefinitely.
+const TAILSCALE_CLI_TIMEOUT: Duration = Duration::from_secs(5);
+const TAILSCALE_UP_TIMEOUT: Duration = Duration::from_secs(45);
+const TAILSCALE_RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
+const TAILSCALE_VALIDATE_TIMEOUT: Duration = Duration::from_secs(3);
+/// Refresh the server-side device record often enough for a remote role/tag
+/// change to become visible, while keeping ordinary status reads local.
+const TAILSCALE_RECONCILE_INTERVAL_SECONDS: u64 = 15;
 const TAILSCALE_RELEASES_URL: &str = "https://api.github.com/repos/tailscale/tailscale/releases/latest";
 const TAILSCALE_RELEASES_PAGE_URL: &str = "https://github.com/tailscale/tailscale/releases/latest";
 const CLOUDFLARE_RELEASES_URL: &str = "https://developers.cloudflare.com/cloudflare-one/team-and-resources/devices/cloudflare-one-client/download/index.md";
+// Team requests run through an Access-protected Worker, so a cold isolate or
+// a transient edge connection should not leave the desktop command hanging
+// indefinitely. Keep the retry window short enough for the UI while allowing
+// the Worker a moment to become ready.
+const TEAM_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const TEAM_HTTP_TIMEOUT: Duration = Duration::from_secs(20);
+const TEAM_HTTP_RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(250), Duration::from_secs(1)];
+static TEAM_HTTP_CLIENT: once_cell::sync::Lazy<reqwest::Client> = once_cell::sync::Lazy::new(|| {
+    reqwest::Client::builder()
+        .connect_timeout(TEAM_HTTP_CONNECT_TIMEOUT)
+        .timeout(TEAM_HTTP_TIMEOUT)
+        .pool_idle_timeout(Duration::from_secs(30))
+        .user_agent("clash-verge-team")
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+});
+// Managed OAuth may rotate refresh tokens. Serialize the refresh path and
+// reload the session after waiting so concurrent account/status calls cannot
+// redeem the same token or overwrite a newer token on disk.
+static SESSION_REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+// Keep session writes serialized and replace the encrypted blob atomically.
+// Background account/profile updates otherwise can overlap on Windows, where
+// a reader may observe a partially truncated file during `fs::write`.
+static SESSION_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static BACKGROUND_STARTED: AtomicBool = AtomicBool::new(false);
 /// Country code observed immediately before WARP is connected. This is the
 /// route supplied by Clash TUN in the documented verification flow.
 static CLASH_TUN_LOCATION: once_cell::sync::Lazy<Mutex<Option<String>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(None));
+/// Country observed through a direct request before WARP is connected. This
+/// is kept separately from the Clash TUN baseline so the UI can accept either
+/// a matching proxy node or a matching local network as a valid route.
+static LOCAL_NETWORK_LOCATION: once_cell::sync::Lazy<Mutex<Option<String>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(None));
 /// Last explicit `tailscale netcheck` result requested by the UI. The probe
 /// takes several seconds, so it runs on demand only and is cached here; the
@@ -57,6 +95,9 @@ static NETCHECK_CACHE: once_cell::sync::Lazy<Mutex<Option<(u64, TailscaleNetchec
     once_cell::sync::Lazy::new(|| Mutex::new(None));
 static TAILSCALE_UPDATE_CACHE: once_cell::sync::Lazy<Mutex<Option<ClientUpdateStatus>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(None));
+/// Avoid duplicate Worker reconciles when a foreground refresh overlaps with
+/// the background status path.
+static TAILSCALE_RECONCILE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 static CLOUDFLARE_UPDATE_CACHE: once_cell::sync::Lazy<Mutex<Option<ClientUpdateStatus>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(None));
 
@@ -161,6 +202,8 @@ pub struct TailscaleInfo {
     pub key_expires_at: Option<u64>,
     pub role: Option<String>,
     pub tag: Option<String>,
+    #[serde(default)]
+    pub last_reconciled_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -252,6 +295,8 @@ pub struct CloudflareOneStatus {
     pub warp_enabled: Option<bool>,
     pub clash_tun_location: Option<String>,
     pub location_match: Option<bool>,
+    pub local_network_location: Option<String>,
+    pub local_location_match: Option<bool>,
     pub last_checked_at: u64,
     pub error: Option<String>,
     pub update: ClientUpdateStatus,
@@ -466,7 +511,13 @@ fn save_session(session: &TeamSession) -> Result<()> {
     }
     let encrypted =
         encrypt_data(&serde_json::to_string(session)?).map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    std::fs::write(path, encrypted)?;
+    let _write_guard = SESSION_WRITE_LOCK.lock();
+    let temporary = path.with_extension(format!("tmp-{}", random_urlsafe(8)?));
+    std::fs::write(&temporary, encrypted)?;
+    if let Err(error) = crate::utils::server::replace_file_atomic(&temporary, &path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error).with_context(|| format!("failed to replace team session: {}", path.display()));
+    }
     Ok(())
 }
 
@@ -476,6 +527,7 @@ const fn tailscale_program() -> &'static str {
 
 fn tailscale_command() -> Command {
     let mut command = Command::new(tailscale_program());
+    command.kill_on_drop(true);
     // CREATE_NO_WINDOW: spawning the console-subsystem tailscale CLI from the
     // GUI app would otherwise flash a console window on every status poll.
     #[cfg(windows)]
@@ -484,12 +536,13 @@ fn tailscale_command() -> Command {
 }
 
 async fn tailscale_output(args: &[&str]) -> Result<std::process::Output> {
-    tailscale_command()
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .with_context(|| format!("{} is not installed or is unavailable", tailscale_program()))
+    tokio::time::timeout(
+        TAILSCALE_CLI_TIMEOUT,
+        tailscale_command().args(args).stdin(Stdio::null()).output(),
+    )
+    .await
+    .with_context(|| format!("{} command timed out", tailscale_program()))?
+    .with_context(|| format!("{} is not installed or is unavailable", tailscale_program()))
 }
 
 fn tailscale_service_command() -> Command {
@@ -662,7 +715,6 @@ fn latency_millis(value: &str) -> Option<f64> {
         .map(str::trim)
         .or_else(|| value.strip_suffix("MS").map(str::trim))
         .and_then(|value| value.parse::<f64>().ok())
-        .map(|value| value)
         .or_else(|| {
             value
                 .strip_suffix('s')
@@ -671,15 +723,15 @@ fn latency_millis(value: &str) -> Option<f64> {
                 .map(|value| value * 1000.0)
         })
         .or_else(|| value.parse::<f64>().ok())?;
-    Some(if value.ends_with("ms") || value.ends_with("MS") {
-        number
-    } else if value.ends_with('s') {
-        number
-    } else if number.abs() < 1.0 {
-        number * 1000.0
-    } else {
-        number
-    })
+    Some(
+        if value.ends_with("ms") || value.ends_with("MS") || value.ends_with('s') {
+            number
+        } else if number.abs() < 1.0 {
+            number * 1000.0
+        } else {
+            number
+        },
+    )
 }
 
 fn latency_number_millis(value: f64) -> f64 {
@@ -821,8 +873,23 @@ async fn tailscale_netcheck_snapshot() -> TailscaleNetcheck {
     }
 }
 
-async fn tailscale_status_snapshot() -> TailscaleStatus {
-    let Ok(version) = tailscale_output(&["version"]).await else {
+async fn tailscale_status_snapshot_with_profiles(include_profiles: bool) -> TailscaleStatus {
+    // These probes are independent. Running them together keeps a slow local
+    // daemon (or process startup on Windows) from multiplying status latency.
+    let profiles = async {
+        if include_profiles {
+            Some(tailscale_profiles().await)
+        } else {
+            None
+        }
+    };
+    let (version, status, ip, profiles) = tokio::join!(
+        tailscale_output(&["version"]),
+        tailscale_output(&["status", "--json"]),
+        tailscale_output(&["ip", "-4"]),
+        profiles,
+    );
+    let Ok(version) = version else {
         return TailscaleStatus::default();
     };
     let version_text = if version.stdout.is_empty() {
@@ -842,7 +909,7 @@ async fn tailscale_status_snapshot() -> TailscaleStatus {
         ..TailscaleStatus::default()
     };
 
-    if let Ok(status) = tailscale_output(&["status", "--json"]).await
+    if let Ok(status) = status
         && status.status.success()
     {
         result.running = true;
@@ -867,7 +934,7 @@ async fn tailscale_status_snapshot() -> TailscaleStatus {
             }
         }
     }
-    if let Ok(ip) = tailscale_output(&["ip", "-4"]).await
+    if let Ok(ip) = ip
         && ip.status.success()
         && result.ipv4.is_none()
     {
@@ -884,9 +951,22 @@ async fn tailscale_status_snapshot() -> TailscaleStatus {
             result.addresses.insert(0, ipv4.clone());
         }
     }
-    result.profiles = tailscale_profiles().await;
+    if let Some(profiles) = profiles {
+        result.profiles = profiles;
+    }
     result.update = TAILSCALE_UPDATE_CACHE.lock().clone().unwrap_or_default();
     result
+}
+
+async fn tailscale_status_snapshot() -> TailscaleStatus {
+    tailscale_status_snapshot_with_profiles(true).await
+}
+
+/// Probe only daemon state and identity. Account-profile enumeration is useful
+/// for the settings page but needlessly expensive while waiting for `tailscale
+/// up` to publish its node identity.
+async fn tailscale_status_snapshot_fast() -> TailscaleStatus {
+    tailscale_status_snapshot_with_profiles(false).await
 }
 
 async fn tailscale_profiles() -> Vec<TailscaleProfile> {
@@ -1115,17 +1195,17 @@ fn version_is_newer(current: Option<&str>, latest: Option<&str>) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn cloudflare_platform_name() -> &'static str {
+const fn cloudflare_platform_name() -> &'static str {
     "Windows"
 }
 
 #[cfg(target_os = "macos")]
-fn cloudflare_platform_name() -> &'static str {
+const fn cloudflare_platform_name() -> &'static str {
     "macOS"
 }
 
 #[cfg(target_os = "linux")]
-fn cloudflare_platform_name() -> &'static str {
+const fn cloudflare_platform_name() -> &'static str {
     "Linux"
 }
 
@@ -1287,7 +1367,7 @@ fn parse_cloudflare_trace(text: &str) -> CloudflareTrace {
     trace
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct CloudflareTrace {
     ip: Option<String>,
     country: Option<String>,
@@ -1295,22 +1375,29 @@ struct CloudflareTrace {
     warp_enabled: Option<bool>,
 }
 
-async fn cloudflare_trace() -> Result<CloudflareTrace> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(3))
-        .timeout(Duration::from_secs(5))
-        .build()
-        .context("failed to create Cloudflare trace client")?;
-    let response = client
-        .get("https://www.cloudflare.com/cdn-cgi/trace")
-        .header(reqwest::header::USER_AGENT, "clash-verge-rev")
-        .send()
+async fn cloudflare_trace_with_proxy(proxy_type: ProxyType) -> Result<CloudflareTrace> {
+    let response = NetworkManager::new()
+        .get_with_interrupt(
+            "https://www.cloudflare.com/cdn-cgi/trace",
+            proxy_type,
+            Some(5),
+            Some("clash-verge-rev".into()),
+            false,
+        )
         .await
         .context("Cloudflare trace request failed")?;
-    let response = response
-        .error_for_status()
-        .context("Cloudflare trace returned an error")?;
-    Ok(parse_cloudflare_trace(&response.text().await?))
+    if !response.status().is_success() {
+        bail!("Cloudflare trace returned an error: {}", response.status());
+    }
+    Ok(parse_cloudflare_trace(
+        response
+            .text_with_charset()
+            .context("failed to read Cloudflare trace response")?,
+    ))
+}
+
+async fn cloudflare_trace() -> Result<CloudflareTrace> {
+    cloudflare_trace_with_proxy(ProxyType::None).await
 }
 
 async fn cloudflare_one_status_snapshot() -> CloudflareOneStatus {
@@ -1378,6 +1465,12 @@ async fn cloudflare_one_status_snapshot() -> CloudflareOneStatus {
                 .as_ref()
                 .zip(result.exit_country.as_ref())
                 .map(|(clash, exit)| clash.eq_ignore_ascii_case(exit));
+            result.local_network_location = LOCAL_NETWORK_LOCATION.lock().clone();
+            result.local_location_match = result
+                .local_network_location
+                .as_ref()
+                .zip(result.exit_country.as_ref())
+                .map(|(local, exit)| local.eq_ignore_ascii_case(exit));
         }
         Err(error) => result.error = Some(error.to_string()),
     }
@@ -1404,16 +1497,25 @@ fn create_tailscale_key_file(key: &str) -> Result<PathBuf> {
 async fn tailscale_up(key: &str) -> Result<()> {
     let path = create_tailscale_key_file(key)?;
     let path_arg = format!("--auth-key=file:{}", path.to_string_lossy());
-    let result = tailscale_command()
-        .arg("up")
-        .arg("--reset")
-        .arg(path_arg)
-        .arg("--accept-routes")
-        .arg("--accept-dns=true")
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .map_err(|error| anyhow::anyhow!("failed to start tailscale up: {error}"));
+    let result = tokio::time::timeout(
+        TAILSCALE_UP_TIMEOUT,
+        tailscale_command()
+            .arg("up")
+            .arg("--reset")
+            .arg(path_arg)
+            .arg("--accept-routes")
+            .arg("--accept-dns=true")
+            .stdin(Stdio::null())
+            .output(),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "tailscale up timed out after {} seconds",
+            TAILSCALE_UP_TIMEOUT.as_secs()
+        )
+    })
+    .and_then(|result| result.map_err(|error| anyhow::anyhow!("failed to start tailscale up: {error}")));
     let _ = std::fs::remove_file(path);
     let output = result?;
     if !output.status.success() {
@@ -1442,17 +1544,117 @@ async fn checked_response(response: reqwest::Response) -> Result<reqwest::Respon
     bail!("team Worker request failed: {status}: {detail}")
 }
 
+fn retryable_worker_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_EARLY
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+}
+
+fn retryable_worker_error(error: &reqwest::Error) -> bool {
+    error.is_connect() || error.is_timeout() || error.is_request()
+}
+
+/// Send a team Worker request with a bounded retry budget for transient edge
+/// failures. The request builder is recreated for each attempt so callers can
+/// safely include bodies and headers without reusing a consumed request.
+async fn send_team_request_with_policy<F>(
+    mut build: F,
+    retry: bool,
+    retry_responses: bool,
+    operation: &str,
+) -> Result<reqwest::Response>
+where
+    F: FnMut() -> reqwest::RequestBuilder,
+{
+    let attempts = if retry { TEAM_HTTP_RETRY_DELAYS.len() + 1 } else { 1 };
+    let mut attempt = 0;
+    loop {
+        match build().send().await {
+            Ok(response) => {
+                if retry
+                    && retry_responses
+                    && retryable_worker_status(response.status())
+                    && let Some(delay) = TEAM_HTTP_RETRY_DELAYS.get(attempt).copied()
+                {
+                    // Drop the intermediate response body before waiting for
+                    // the next attempt; this also returns the connection to
+                    // reqwest's pool promptly.
+                    let status = response.status();
+                    drop(response);
+                    attempt += 1;
+                    tokio::time::sleep(delay).await;
+                    logging!(
+                        debug,
+                        Type::Config,
+                        "team Worker request returned {status}; retrying ({}/{})",
+                        attempt,
+                        attempts
+                    );
+                    continue;
+                }
+                return Ok(response);
+            }
+            Err(error) => {
+                if retry
+                    && retryable_worker_error(&error)
+                    && let Some(delay) = TEAM_HTTP_RETRY_DELAYS.get(attempt).copied()
+                {
+                    attempt += 1;
+                    tokio::time::sleep(delay).await;
+                    logging!(
+                        debug,
+                        Type::Config,
+                        "team Worker request failed transiently; retrying ({}/{})",
+                        attempt,
+                        attempts
+                    );
+                    continue;
+                }
+                return Err(error).with_context(|| operation.to_owned());
+            }
+        }
+    }
+}
+
+async fn send_team_request<F>(build: F, retry: bool, operation: &str) -> Result<reqwest::Response>
+where
+    F: FnMut() -> reqwest::RequestBuilder,
+{
+    send_team_request_with_policy(build, retry, retry, operation).await
+}
+
+async fn send_team_request_transport_retry<F>(build: F, operation: &str) -> Result<reqwest::Response>
+where
+    F: FnMut() -> reqwest::RequestBuilder,
+{
+    // A failed `send()` means no response reached the caller, so retry only
+    // connection/timeouts here. Never replay a response status for OAuth POSTs
+    // because the provider may have already rotated the refresh token.
+    send_team_request_with_policy(build, true, false, operation).await
+}
+
 async fn team_post(path: &str, body: serde_json::Value) -> Result<reqwest::Response> {
     let config = load_config()?;
     let session = usable_session().await?;
-    let response = reqwest::Client::new()
-        .post(endpoint(&config.api_base_url, path)?)
-        .bearer_auth(&session.access_token)
-        .header("x-team-device", device_id()?)
-        .json(&body)
-        .send()
-        .await
-        .context("team Worker request failed")?;
+    let url = endpoint(&config.api_base_url, path)?;
+    let team_device_id = device_id()?;
+    // Key issuance is deliberately single-attempt: retrying a POST after a
+    // transport failure could mint two one-time Tailscale keys. Reconcile,
+    // validate and logout are idempotent and can safely use the retry budget.
+    let retry = !path.ends_with("/key");
+    let response = send_team_request(
+        || {
+            TEAM_HTTP_CLIENT
+                .post(url.clone())
+                .bearer_auth(&session.access_token)
+                .header("x-team-device", &team_device_id)
+                .json(&body)
+        },
+        retry,
+        "team Worker request failed",
+    )
+    .await?;
     checked_response(response).await
 }
 
@@ -1495,14 +1697,80 @@ async fn tailscale_validate(device_id: &str, node_id: &str) -> Result<bool> {
 
 async fn save_tailscale_reconcile(response: TailscaleReconcileResponse, node_id: Option<String>) -> Result<()> {
     let mut session = usable_session().await?;
+    let previous = session.tailscale.clone().unwrap_or_default();
     session.tailscale = Some(TailscaleInfo {
-        node_id,
-        key_issued_at: session.tailscale.as_ref().and_then(|info| info.key_issued_at),
-        key_expires_at: session.tailscale.as_ref().and_then(|info| info.key_expires_at),
-        role: response.role,
-        tag: response.tag,
+        node_id: node_id.or(previous.node_id),
+        key_issued_at: previous.key_issued_at,
+        key_expires_at: previous.key_expires_at,
+        role: response.role.or(previous.role),
+        tag: response.tag.or(previous.tag),
+        last_reconciled_at: Some(now()),
     });
     save_session(&session)
+}
+
+fn invalidate_tailscale_reconcile() {
+    let Ok(Some(mut session)) = load_session() else {
+        return;
+    };
+    let Some(info) = session.tailscale.as_mut() else {
+        return;
+    };
+    info.last_reconciled_at = None;
+    if let Err(error) = save_session(&session) {
+        logging!(
+            debug,
+            Type::Config,
+            "failed to invalidate Tailscale reconcile cache: {error:#}"
+        );
+    }
+}
+
+/// Reconcile the local node with the Worker when the cached role/tag is stale.
+/// The result is optional so callers can distinguish "not due yet" from an
+/// attempted request that failed (the latter still gets a lightweight
+/// validation fallback in `status`).
+async fn maybe_reconcile_tailscale(snapshot: &TailscaleStatus, session: &Option<TeamSession>) -> Option<bool> {
+    let node_id = snapshot.node_id.as_deref()?;
+    snapshot.device_name.as_deref()?;
+    let authenticated = session.as_ref().is_some_and(|value| !value.access_token.is_empty());
+    if !authenticated {
+        return None;
+    }
+
+    let cached = session.as_ref().and_then(|value| value.tailscale.as_ref());
+    let node_changed = cached
+        .and_then(|value| value.node_id.as_deref())
+        .is_none_or(|value| value != node_id);
+    let reconcile_due = cached
+        .and_then(|value| value.last_reconciled_at)
+        .is_none_or(|checked_at| now().saturating_sub(checked_at) >= TAILSCALE_RECONCILE_INTERVAL_SECONDS);
+    if !node_changed && !reconcile_due {
+        return None;
+    }
+    if TAILSCALE_RECONCILE_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
+        return None;
+    }
+
+    let result = tokio::time::timeout(TAILSCALE_RECONCILE_TIMEOUT, async {
+        let device_id = device_id()?;
+        let response = tailscale_reconcile(&device_id, snapshot).await?;
+        save_tailscale_reconcile(response, Some(node_id.to_owned())).await
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("Tailscale reconcile timed out"))
+    .and_then(|result| result);
+    TAILSCALE_RECONCILE_IN_FLIGHT.store(false, Ordering::Release);
+    match result {
+        Ok(()) => Some(true),
+        Err(error) => {
+            logging!(debug, Type::Config, "automatic Tailscale reconcile failed: {error:#}");
+            Some(false)
+        }
+    }
 }
 
 fn endpoint(base: &str, path: &str) -> Result<reqwest::Url> {
@@ -1516,7 +1784,12 @@ async fn metadata(config: &TeamConfig) -> Result<OAuthMetadata> {
     // Managed OAuth serves the discovery document on the Access-protected
     // application domain itself; no override is needed.
     let url = endpoint(&config.api_base_url, "/.well-known/oauth-authorization-server")?;
-    let response = reqwest::Client::new().get(url).send().await?;
+    let response = send_team_request(
+        || TEAM_HTTP_CLIENT.get(url.clone()),
+        true,
+        "OAuth discovery request failed",
+    )
+    .await?;
     checked_response(response)
         .await?
         .json()
@@ -1529,18 +1802,20 @@ async fn register_client(metadata: &OAuthMetadata, redirect_uri: &str, resource:
         .registration_endpoint
         .as_ref()
         .context("oauth_client_id is empty and discovery has no registration_endpoint")?;
-    let response = reqwest::Client::new()
-        .post(registration_endpoint)
-        .json(&serde_json::json!({
-            "client_name": "Clash Verge Team Desktop",
-            "redirect_uris": [redirect_uri],
-            "grant_types": ["authorization_code"],
-            "response_types": ["code"],
-            "token_endpoint_auth_method": "none",
-            "resource": resource
-        }))
-        .send()
-        .await?;
+    let body = serde_json::json!({
+        "client_name": "Clash Verge Team Desktop",
+        "redirect_uris": [redirect_uri],
+        "grant_types": ["authorization_code"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+        "resource": resource
+    });
+    let response = send_team_request(
+        || TEAM_HTTP_CLIENT.post(registration_endpoint).json(&body),
+        false,
+        "OAuth client registration request failed",
+    )
+    .await?;
     let response = checked_response(response).await?;
     Ok(response.json::<ClientRegistration>().await?.client_id)
 }
@@ -1648,11 +1923,13 @@ pub async fn login() -> Result<TeamStatus> {
         ("code_verifier", verifier.as_str()),
     ];
     token_form.push(("resource", resource.as_str()));
-    let token = reqwest::Client::new()
-        .post(&metadata.token_endpoint)
-        .form(&token_form)
-        .send()
-        .await?;
+    let token_endpoint = metadata.token_endpoint.clone();
+    let token = send_team_request(
+        || TEAM_HTTP_CLIENT.post(&token_endpoint).form(&token_form),
+        false,
+        "OAuth token request failed",
+    )
+    .await?;
     let token = checked_response(token).await?.json::<OAuthTokenResponse>().await?;
     save_session(&TeamSession {
         access_token: token.access_token,
@@ -1671,21 +1948,38 @@ pub async fn login() -> Result<TeamStatus> {
 }
 
 async fn usable_session() -> Result<TeamSession> {
+    let session = load_session()?.context("not authenticated")?;
+    if session.expires_at > now().saturating_add(60) {
+        return Ok(session);
+    }
+
+    // Access refresh tokens can be rotated on redemption. Wait for any other
+    // caller to finish, then reload from disk: the first caller may already
+    // have written a fresh access/refresh token while we were waiting.
+    let _refresh_guard = SESSION_REFRESH_LOCK.lock().await;
     let mut session = load_session()?.context("not authenticated")?;
     if session.expires_at > now().saturating_add(60) {
         return Ok(session);
     }
     let refresh_token = session.refresh_token.clone().context("login session expired")?;
-    let token_form = vec![
+    let mut token_form = vec![
         ("grant_type", "refresh_token"),
         ("client_id", session.client_id.as_str()),
         ("refresh_token", refresh_token.as_str()),
     ];
-    let token = reqwest::Client::new()
-        .post(&session.token_endpoint)
-        .form(&token_form)
-        .send()
-        .await?;
+    if !session.resource.trim().is_empty() {
+        token_form.push(("resource", session.resource.as_str()));
+    }
+    // A token refresh is a POST and some providers rotate refresh tokens, so
+    // never replay it after a response. Retry only a connection/timeout error
+    // that produced no response, keeping a transient edge blip from forcing
+    // the user through browser login again.
+    let token_endpoint = session.token_endpoint.clone();
+    let token = send_team_request_transport_retry(
+        || TEAM_HTTP_CLIENT.post(&token_endpoint).form(&token_form),
+        "team OAuth token refresh failed",
+    )
+    .await?;
     let token = checked_response(token).await?.json::<OAuthTokenResponse>().await?;
     session.access_token = token.access_token;
     session.refresh_token = token.refresh_token.or(Some(refresh_token));
@@ -1702,19 +1996,43 @@ pub async fn status() -> Result<TeamStatus> {
     let latest = profiles.latest_arc();
     let managed_profile_installed = latest.get_item(MANAGED_PROFILE_UID).is_ok();
     let managed_profile_active = latest.is_current_profile_index(&MANAGED_PROFILE_UID.into());
-    let mut tailscale = tailscale_status_snapshot().await;
-    if let Some((checked_at, netcheck)) = NETCHECK_CACHE.lock().clone() {
+    // The two local network clients are independent. Probe them together so a
+    // slow WARP trace does not add its latency to every Tailscale status read.
+    let (mut tailscale, cloudflare_one) = tokio::join!(tailscale_status_snapshot(), cloudflare_one_status_snapshot(),);
+    let netcheck_cache = NETCHECK_CACHE.lock().clone();
+    if let Some((checked_at, netcheck)) = netcheck_cache {
         tailscale.netcheck = Some(netcheck);
         tailscale.netcheck_at = Some(checked_at);
     }
+    // A role/tag update made in the remote admin page only reaches the local
+    // session after reconcile. Do that opportunistically, but no more than
+    // once per short interval so ordinary status reads stay fast.
+    let reconcile_result = if tailscale.logged_in {
+        maybe_reconcile_tailscale(&tailscale, &session).await
+    } else {
+        None
+    };
+    if reconcile_result.is_some() {
+        // `team_post` may refresh the OAuth access token while reconciling.
+        // Reload the session so both the refreshed token and new role/tag are
+        // reflected in the response below.
+        session = load_session()?;
+    }
     // Removing a device in the team management page revokes its server-side
     // record, but Tailscale deliberately leaves the local CLI in Running
-    // state. Validate the record before presenting that stale state as a
-    // successful login, and force a local logout when access was revoked.
-    if tailscale.logged_in
+    // state. If reconcile failed, retain the old lightweight validation check
+    // as a fallback and force a local logout when access was revoked.
+    if reconcile_result == Some(false)
+        && tailscale.logged_in
         && let Some(node_id) = tailscale.node_id.as_deref()
         && session.as_ref().is_some_and(|value| !value.access_token.is_empty())
-        && let Ok(false) = tailscale_validate(&device_id()?, node_id).await
+        && matches!(
+            tokio::time::timeout(TAILSCALE_VALIDATE_TIMEOUT, async {
+                tailscale_validate(&device_id()?, node_id).await
+            })
+            .await,
+            Ok(Ok(false))
+        )
     {
         let _ = tailscale_output(&["logout"]).await;
         if let Some(mut invalid_session) = load_session()? {
@@ -1724,7 +2042,6 @@ pub async fn status() -> Result<TeamStatus> {
         }
         tailscale = tailscale_status_snapshot().await;
     }
-    let cloudflare_one = cloudflare_one_status_snapshot().await;
     if let Some(info) = session.as_ref().and_then(|value| value.tailscale.as_ref()) {
         if tailscale.node_id.is_none() {
             tailscale.node_id = info.node_id.clone();
@@ -1750,7 +2067,7 @@ pub async fn status() -> Result<TeamStatus> {
 /// state. Authentication remains an explicit operation in
 /// `tailscale_connect`.
 pub async fn tailscale_start() -> Result<TeamStatus> {
-    let snapshot = tailscale_status_snapshot().await;
+    let snapshot = tailscale_status_snapshot_fast().await;
     if !snapshot.installed {
         bail!("Tailscale CLI is not installed or is unavailable");
     }
@@ -1760,7 +2077,7 @@ pub async fn tailscale_start() -> Result<TeamStatus> {
     start_tailscale_service().await?;
     for _ in 0..20 {
         tokio::time::sleep(Duration::from_millis(500)).await;
-        if tailscale_status_snapshot().await.running {
+        if tailscale_status_snapshot_fast().await.running {
             return status().await;
         }
     }
@@ -1771,7 +2088,7 @@ pub async fn tailscale_start() -> Result<TeamStatus> {
 /// status reads. The probe takes several seconds (it contacts the DERP
 /// regions), so it never runs on the periodic status polling path.
 pub async fn tailscale_netcheck() -> Result<TeamStatus> {
-    let snapshot = tailscale_status_snapshot().await;
+    let snapshot = tailscale_status_snapshot_fast().await;
     if !snapshot.installed {
         bail!("Tailscale CLI is not installed or is unavailable");
     }
@@ -1826,14 +2143,22 @@ async fn cloudflare_one_command(action: &str) -> Result<CloudflareOneStatus> {
     let (program, _) = find_warp_cli().await?;
 
     if action == "connect" {
-        // Record the route selected by Clash TUN before WARP takes over. The
-        // next status snapshot compares Cloudflare's exit country with it.
+        // Record both baselines before WARP takes over. The direct request is
+        // the user's local-network location; the explicit localhost proxy
+        // request captures the route selected by Clash TUN when available.
         let current_status = warp_cli_output(&program, &["status"]).await;
         let currently_connected = current_status
             .as_ref()
             .is_ok_and(|output| output.status.success() && parse_warp_connected(&warp_cli_text(output)));
-        if !currently_connected && let Ok(trace) = cloudflare_trace().await {
-            *CLASH_TUN_LOCATION.lock() = trace.country;
+        if !currently_connected {
+            let (local_result, clash_result) = tokio::join!(
+                cloudflare_trace_with_proxy(ProxyType::None),
+                cloudflare_trace_with_proxy(ProxyType::Localhost),
+            );
+            let local_country = local_result.ok().and_then(|trace| trace.country);
+            let clash_country = clash_result.ok().and_then(|trace| trace.country);
+            *LOCAL_NETWORK_LOCATION.lock() = local_country.clone();
+            *CLASH_TUN_LOCATION.lock() = clash_country.or(local_country);
         }
     }
 
@@ -1850,7 +2175,7 @@ async fn cloudflare_one_command(action: &str) -> Result<CloudflareOneStatus> {
 }
 
 pub async fn connect_cloudflare_one() -> Result<TeamStatus> {
-    if tailscale_status_snapshot().await.logged_in {
+    if tailscale_status_snapshot_fast().await.logged_in {
         bail!("Cloudflare One Client 与 Tailscale 不能同时连接，请先断开 Tailscale");
     }
     cloudflare_one_command("connect").await?;
@@ -1864,6 +2189,7 @@ pub async fn refresh_cloudflare_one() -> Result<TeamStatus> {
 pub async fn disconnect_cloudflare_one() -> Result<TeamStatus> {
     cloudflare_one_command("disconnect").await?;
     *CLASH_TUN_LOCATION.lock() = None;
+    *LOCAL_NETWORK_LOCATION.lock() = None;
     status().await
 }
 
@@ -1895,13 +2221,13 @@ async fn issue_tailscale_key(device_id: &str, hostname: &str) -> Result<Tailscal
 /// Right after `tailscale up` the backend is still Starting and Self.ID is
 /// absent; poll until the node identity shows up (or give up after ~10s).
 async fn wait_for_node_identity() -> TailscaleStatus {
-    let mut snapshot = tailscale_status_snapshot().await;
+    let mut snapshot = tailscale_status_snapshot_fast().await;
     for _ in 0..20 {
         if snapshot.node_id.is_some() {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        snapshot = tailscale_status_snapshot().await;
+        snapshot = tailscale_status_snapshot_fast().await;
     }
     snapshot
 }
@@ -1910,7 +2236,7 @@ pub async fn tailscale_connect() -> Result<TeamStatus> {
         bail!("Tailscale 与 Cloudflare One Client 不能同时连接，请先断开 Cloudflare One Client");
     }
     let device_id = device_id()?;
-    let before = tailscale_status_snapshot().await;
+    let before = tailscale_status_snapshot_fast().await;
     if before.logged_in && before.node_id.is_some() {
         let node_id = before.node_id.clone();
         let response = tailscale_reconcile(&device_id, &before).await?;
@@ -1947,6 +2273,7 @@ pub async fn tailscale_connect() -> Result<TeamStatus> {
                     key_expires_at: issued.expires_at,
                     role: reconcile.role.or(issued.role),
                     tag: reconcile.tag.or(issued.tag),
+                    last_reconciled_at: Some(now()),
                 });
                 save_session(&session)?;
                 return status().await;
@@ -1970,12 +2297,16 @@ pub async fn tailscale_switch_account(account: &str) -> Result<TeamStatus> {
         }
         bail!("tailscale switch failed: {detail}");
     }
+    // The selected profile may point at a new node even when the CLI keeps
+    // the same hostname. Force the next status read to reconcile it with the
+    // authenticated team account.
+    invalidate_tailscale_reconcile();
     status().await
 }
 
 pub async fn tailscale_refresh() -> Result<TeamStatus> {
     let device_id = device_id()?;
-    let snapshot = tailscale_status_snapshot().await;
+    let snapshot = tailscale_status_snapshot_fast().await;
     if !snapshot.logged_in || snapshot.node_id.is_none() {
         return tailscale_connect().await;
     }
@@ -1986,7 +2317,7 @@ pub async fn tailscale_refresh() -> Result<TeamStatus> {
 }
 
 pub async fn tailscale_logout() -> Result<TeamStatus> {
-    let snapshot = tailscale_status_snapshot().await;
+    let snapshot = tailscale_status_snapshot_fast().await;
     let session = load_session()?;
     let node_id = snapshot.node_id.or_else(|| {
         session
@@ -2041,12 +2372,19 @@ pub async fn logout() -> Result<()> {
 pub async fn refresh_account() -> Result<TeamStatus> {
     let config = load_config()?;
     let mut session = usable_session().await?;
-    let account_response = reqwest::Client::new()
-        .get(endpoint(&config.api_base_url, &config.account_path)?)
-        .bearer_auth(&session.access_token)
-        .header("x-team-device", device_id()?)
-        .send()
-        .await?;
+    let url = endpoint(&config.api_base_url, &config.account_path)?;
+    let team_device_id = device_id()?;
+    let account_response = send_team_request(
+        || {
+            TEAM_HTTP_CLIENT
+                .get(url.clone())
+                .bearer_auth(&session.access_token)
+                .header("x-team-device", &team_device_id)
+        },
+        true,
+        "team account request failed",
+    )
+    .await?;
     let mut account = checked_response(account_response).await?.json::<TeamAccount>().await?;
     if account.quota.is_none() {
         account.quota = session.account.as_ref().and_then(|previous| previous.quota.clone());
@@ -2077,14 +2415,24 @@ fn parse_subscription_info(value: Option<&reqwest::header::HeaderValue>) -> Team
 pub async fn sync_managed_profile() -> Result<TeamStatus> {
     let config = load_config()?;
     let mut session = usable_session().await?;
-    let mut request = reqwest::Client::new()
-        .get(endpoint(&config.api_base_url, &config.profile_path)?)
-        .bearer_auth(&session.access_token)
-        .header("x-team-device", device_id()?);
-    if let Some(etag) = session.etag.as_ref() {
-        request = request.header(reqwest::header::IF_NONE_MATCH, etag);
-    }
-    let response = request.send().await?;
+    let url = endpoint(&config.api_base_url, &config.profile_path)?;
+    let team_device_id = device_id()?;
+    let etag = session.etag.clone();
+    let response = send_team_request(
+        || {
+            let mut request = TEAM_HTTP_CLIENT
+                .get(url.clone())
+                .bearer_auth(&session.access_token)
+                .header("x-team-device", &team_device_id);
+            if let Some(etag) = etag.as_deref() {
+                request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+            }
+            request
+        },
+        true,
+        "managed profile request failed",
+    )
+    .await?;
     if response.status() == reqwest::StatusCode::NOT_MODIFIED {
         session.last_sync_at = Some(now());
         save_session(&session)?;

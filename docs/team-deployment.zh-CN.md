@@ -169,6 +169,9 @@ gh variable set WORKER_CUSTOM_DOMAIN --env team-production -R DSYZayn/clash-verg
    - `ACCESS_AUD`（Text）：Access 应用的 Application Audience (AUD) tag
    - `UPSTREAM_SUBSCRIPTION_URL`（Secret，可选）：真实订阅 URL；若上游 WAF 拦截机房出口（直连 403）可不填，改用 4c 推送模式
    - 可选：`DEFAULT_TEAM_NAME`（Text，团队显示名）、`CACHE_TTL_SECONDS`（Text，缓存秒数）
+   - 管理员邮箱：配置 `ADMIN_EMAIL`；如需多人管理，可继续保留该变量并增加
+     `ADMIN_EMAIL_1`、`ADMIN_EMAIL_2` 等编号变量（匹配不区分大小写）。未配置任何
+     管理员邮箱时，`/admin` 与 `/v1/admin/*` 会停用。
    - 可选（推送模式）：`ADMIN_API_TOKEN`（Secret，长随机串），见 4c
 
    保存后立即生效；wrangler.toml 启用了 `keep_vars`，之后每次重新部署都会
