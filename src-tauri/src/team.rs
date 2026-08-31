@@ -504,6 +504,15 @@ fn load_session() -> Result<Option<TeamSession>> {
     Ok(Some(serde_json::from_str(&plain)?))
 }
 
+fn clear_session() -> Result<()> {
+    let path = session_path()?;
+    let _write_guard = SESSION_WRITE_LOCK.lock();
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
 fn save_session(session: &TeamSession) -> Result<()> {
     let path = session_path()?;
     if let Some(parent) = path.parent() {
@@ -1805,7 +1814,7 @@ async fn register_client(metadata: &OAuthMetadata, redirect_uri: &str, resource:
     let body = serde_json::json!({
         "client_name": "Clash Verge Team Desktop",
         "redirect_uris": [redirect_uri],
-        "grant_types": ["authorization_code"],
+        "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
         "token_endpoint_auth_method": "none",
         "resource": resource
@@ -1961,7 +1970,13 @@ async fn usable_session() -> Result<TeamSession> {
     if session.expires_at > now().saturating_add(60) {
         return Ok(session);
     }
-    let refresh_token = session.refresh_token.clone().context("login session expired")?;
+    let refresh_token = match session.refresh_token.clone() {
+        Some(value) if !value.trim().is_empty() => value,
+        _ => {
+            clear_session()?;
+            bail!("login session expired; please sign in again")
+        }
+    };
     let mut token_form = vec![
         ("grant_type", "refresh_token"),
         ("client_id", session.client_id.as_str()),
@@ -1980,7 +1995,28 @@ async fn usable_session() -> Result<TeamSession> {
         "team OAuth token refresh failed",
     )
     .await?;
-    let token = checked_response(token).await?.json::<OAuthTokenResponse>().await?;
+    if !token.status().is_success() {
+        let status = token.status();
+        let body = token.text().await.unwrap_or_default();
+        let detail = body.trim().chars().take(500).collect::<String>();
+        let lower = detail.to_ascii_lowercase();
+        if matches!(
+            status,
+            reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::UNAUTHORIZED
+        ) && (lower.contains("invalid_grant")
+            || lower.contains("no grant")
+            || lower.contains("grant not found")
+            || lower.contains("session expired"))
+        {
+            clear_session()?;
+            bail!("login session expired; please sign in again")
+        }
+        if detail.is_empty() {
+            bail!("team OAuth token refresh failed: {status}")
+        }
+        bail!("team OAuth token refresh failed: {status}: {detail}")
+    }
+    let token = token.json::<OAuthTokenResponse>().await?;
     session.access_token = token.access_token;
     session.refresh_token = token.refresh_token.or(Some(refresh_token));
     session.token_type = token.token_type;
@@ -1992,6 +2028,26 @@ async fn usable_session() -> Result<TeamSession> {
 pub async fn status() -> Result<TeamStatus> {
     let configured = load_config().is_ok_and(|config| config.enabled);
     let mut session = load_session()?;
+    // Refresh an expired access token during startup/status polling. If the
+    // provider has invalidated the refresh grant, `usable_session` removes the
+    // stale session so the UI can offer browser login instead of reporting a
+    // generic Worker failure.
+    if session
+        .as_ref()
+        .is_some_and(|value| value.expires_at <= now().saturating_add(60))
+    {
+        match usable_session().await {
+            Ok(refreshed) => session = Some(refreshed),
+            Err(error) => {
+                logging!(
+                    debug,
+                    Type::Config,
+                    "team session refresh during status failed: {error:#}"
+                );
+                session = load_session()?;
+            }
+        }
+    }
     let profiles = Config::profiles().await;
     let latest = profiles.latest_arc();
     let managed_profile_installed = latest.get_item(MANAGED_PROFILE_UID).is_ok();
@@ -2362,10 +2418,7 @@ pub async fn logout() -> Result<()> {
         // refresh explicitly so the subscription list drops the entry at once.
         handle::Handle::refresh_profiles();
     }
-    let path = session_path()?;
-    if path.exists() {
-        std::fs::remove_file(path)?;
-    }
+    clear_session()?;
     Ok(())
 }
 

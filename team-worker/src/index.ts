@@ -33,10 +33,6 @@ interface Env {
   TAILSCALE_OAUTH_CLIENT_SECRET?: string
   ADMIN_EMAIL?: string
   DEFAULT_TAILSCALE_KEY_EXPIRY_SECONDS?: string
-  CASDOOR_ENDPOINT?: string
-  CASDOOR_CLIENT_ID?: string
-  CASDOOR_CLIENT_SECRET?: string
-  CASDOOR_ORGANIZATION?: string
 }
 
 // Keep the original ADMIN_EMAIL binding working while allowing an arbitrary
@@ -313,58 +309,52 @@ function getStringValue(val: unknown): string {
 }
 
 function extractDisplayName(identity: JWTPayload, identityDetails?: Record<string, unknown> | null): string | null {
-  const raw = { ...(identityDetails || {}), ...(identity as Record<string, unknown> || {}) }
+  const raw = { ...(identity as Record<string, unknown> || {}), ...(identityDetails || {}) }
   const email = getStringValue(raw.email)
-  const isEmail = (s: string) => Boolean(email && s.toLowerCase() === email.toLowerCase()) || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s)
+  const isEmail = (value: string) =>
+    Boolean(email && value.toLowerCase() === email.toLowerCase()) ||
+    /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
 
+  // Casdoor exposes the standard OIDC name claim. Keep the same precedence as
+  // sub2api, then support common Cloudflare Access/custom-claim aliases.
   const candidateKeys = [
-    'displayName',
-    'display_name',
-    'displayname',
-    'preferred_username',
-    'preferredUsername',
-    'preferredusername',
-    'username',
-    'user_name',
     'name',
     'nickname',
-    'nickName',
+    'display_name',
+    'displayName',
+    'preferred_username',
+    'preferredUsername',
+    'username',
+    'user_name',
+    'userName',
+    'user_display_name',
+    'userDisplayName',
   ]
 
-  function findInObject(obj: unknown): string {
-    if (!obj || typeof obj !== 'object') return ''
-    const dict = obj as Record<string, unknown>
-    // 1. Direct candidate keys
+  const findInObject = (value: unknown): string => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return ''
+    const dict = value as Record<string, unknown>
     for (const key of candidateKeys) {
       const val = getStringValue(dict[key])
-      if (val && !isEmail(val)) {
-        return val
-      }
+      if (val && !isEmail(val)) return val
     }
-    // 2. Case-insensitive key search
-    for (const k of Object.keys(dict)) {
-      const lowerK = k.toLowerCase()
-      for (const candidate of candidateKeys) {
-        if (
-          lowerK === candidate.toLowerCase() ||
-          lowerK.endsWith('/' + candidate.toLowerCase()) ||
-          lowerK.endsWith(':' + candidate.toLowerCase())
-        ) {
-          const val = getStringValue(dict[k])
-          if (val && !isEmail(val)) {
-            return val
-          }
-        }
-      }
+    for (const key of Object.keys(dict)) {
+      const normalized = key.toLowerCase()
+      const isCandidate = candidateKeys.some((candidate) => {
+        const lowerCandidate = candidate.toLowerCase()
+        return normalized === lowerCandidate ||
+          normalized.endsWith(`/${lowerCandidate}`) ||
+          normalized.endsWith(`:${lowerCandidate}`)
+      })
+      const val = getStringValue(dict[key])
+      if (isCandidate && val && !isEmail(val)) return val
     }
     return ''
   }
 
-  // 1. Check root
   let name = findInObject(raw)
   if (name) return name
 
-  // 2. Check nested claim objects (Cloudflare Access custom claims, SAML attributes, IdP claims)
   const nestedKeys = [
     'custom',
     'custom_attributes',
@@ -375,32 +365,32 @@ function extractDisplayName(identity: JWTPayload, identityDetails?: Record<strin
     'idp',
     'raw_attributes',
     'claims',
+    'oidc_claims',
+    'idp_claims',
+    'saml_attributes',
+    'attributes',
     'user',
     'identity_provider',
   ]
 
   for (const nk of nestedKeys) {
-    const nested = raw[nk]
-    if (nested && typeof nested === 'object') {
-      name = findInObject(nested)
-      if (name) return name
-    }
+    name = findInObject(raw[nk])
+    if (name) return name
   }
 
-  // 3. Check first_name + last_name combinations
-  function getCompositeName(obj: unknown): string {
-    if (!obj || typeof obj !== 'object') return ''
-    const dict = obj as Record<string, unknown>
+  const getCompositeName = (value: unknown): string => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return ''
+    const dict = value as Record<string, unknown>
     const given =
-      getStringValue(dict.firstName) ||
-      getStringValue(dict.first_name) ||
       getStringValue(dict.given_name) ||
-      getStringValue(dict.givenName)
+      getStringValue(dict.givenName) ||
+      getStringValue(dict.first_name) ||
+      getStringValue(dict.firstName)
     const family =
-      getStringValue(dict.lastName) ||
-      getStringValue(dict.last_name) ||
       getStringValue(dict.family_name) ||
-      getStringValue(dict.familyName)
+      getStringValue(dict.familyName) ||
+      getStringValue(dict.last_name) ||
+      getStringValue(dict.lastName)
 
     if (given && family) {
       const hasCJK = /[\u4e00-\u9fa5]/.test(given) || /[\u4e00-\u9fa5]/.test(family)
@@ -419,11 +409,21 @@ function extractDisplayName(identity: JWTPayload, identityDetails?: Record<strin
     if (name) return name
   }
 
-  // Fallback to name if present even if it looks like email
-  const rawName = getStringValue(raw.name)
-  if (rawName) return rawName
+  return null
+}
 
-  return email || null
+function extractIdentityEmail(identity: JWTPayload, identityDetails?: Record<string, unknown> | null): string {
+  const raw = { ...(identity as Record<string, unknown> || {}), ...(identityDetails || {}) }
+  const direct = getStringValue(raw.email)
+  if (direct) return direct
+  for (const key of ['user', 'data', 'attributes', 'profile']) {
+    const nested = raw[key]
+    if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+      const email = getStringValue((nested as Record<string, unknown>).email)
+      if (email) return email
+    }
+  }
+  return ''
 }
 
 async function getUser(
@@ -432,7 +432,7 @@ async function getUser(
   identityDetails?: Record<string, unknown> | null,
 ): Promise<UserRow | null> {
   const subject = identity.sub
-  const email = typeof identity.email === 'string' ? identity.email.trim() : undefined
+  const email = extractIdentityEmail(identity, identityDetails) || undefined
   if (!subject) return null
 
   const user = await env.TEAM_DB.prepare(
@@ -507,7 +507,7 @@ async function provisionUser(
 ): Promise<UserRow | null> {
   const subject = identity.sub
   if (!subject) return null
-  const email = typeof identity.email === 'string' ? identity.email.trim() : null
+  const email = extractIdentityEmail(identity, identityDetails) || null
   const displayName = extractDisplayName(identity, identityDetails)
   await env.TEAM_DB.prepare(
     `INSERT INTO users (access_subject, email, display_name, enabled)
@@ -1024,98 +1024,6 @@ async function requireAdmin(identity: JWTPayload, env: Env) {
     throw new Response('Administrator access required', { status: 403 })
 }
 
-async function syncFromCasdoor(
-  env: Env,
-  endpointOverride?: string,
-  clientIdOverride?: string,
-  clientSecretOverride?: string,
-  orgOverride?: string,
-): Promise<{ synced: number; total: number }> {
-  const endpoint = (endpointOverride || env.CASDOOR_ENDPOINT || '').trim().replace(/\/$/, '')
-  const clientId = (clientIdOverride || env.CASDOOR_CLIENT_ID || '').trim()
-  const clientSecret = (clientSecretOverride || env.CASDOOR_CLIENT_SECRET || '').trim()
-
-  if (!clientId || !clientSecret) {
-    throw new Response(
-      JSON.stringify({ error: '请在 Worker 环境变量中配置 CASDOOR_CLIENT_ID 和 CASDOOR_CLIENT_SECRET' }),
-      { status: 500, headers: { 'content-type': 'application/json' } },
-    )
-  }
-  const org = (orgOverride || env.CASDOOR_ORGANIZATION || 'built-in').trim()
-
-  if (!endpoint) {
-    throw new Response(
-      JSON.stringify({ error: 'Casdoor 服务地址未填写（例如 https://door.example.com）' }),
-      { status: 400, headers: { 'content-type': 'application/json' } },
-    )
-  }
-
-  const authHeader = `Basic ${btoa(`${clientId}:${clientSecret}`)}`
-  const url = `${endpoint}/api/get-users?owner=${encodeURIComponent(org)}`
-  let response: Response
-  try {
-    response = await fetch(url, {
-      headers: { authorization: authHeader },
-    })
-  } catch (error) {
-    console.error('Casdoor fetch users failed:', describeError(error))
-    throw new Response(
-      JSON.stringify({ error: `无法连接 Casdoor (${endpoint})` }),
-      { status: 502, headers: { 'content-type': 'application/json' } },
-    )
-  }
-
-  if (!response.ok) {
-    throw new Response(
-      JSON.stringify({ error: `Casdoor API 返回错误 (HTTP ${response.status})` }),
-      { status: 502, headers: { 'content-type': 'application/json' } },
-    )
-  }
-
-  const data = (await response.json()) as {
-    status: string
-    data: Array<{ name: string; displayName?: string; email?: string; firstName?: string; lastName?: string }>
-  }
-
-  if (data.status !== 'ok' || !Array.isArray(data.data)) {
-    throw new Response(
-      JSON.stringify({ error: 'Casdoor API 返回数据格式不符合预期' }),
-      { status: 502, headers: { 'content-type': 'application/json' } },
-    )
-  }
-
-  let synced = 0
-  for (const u of data.data) {
-    let realName = u.displayName?.trim() || ''
-    if (!realName && u.firstName && u.lastName) {
-      const hasCJK = /[\u4e00-\u9fa5]/.test(u.firstName) || /[\u4e00-\u9fa5]/.test(u.lastName)
-      realName = hasCJK ? `${u.lastName.trim()}${u.firstName.trim()}` : `${u.firstName.trim()} ${u.lastName.trim()}`
-    }
-    if (!realName) realName = u.name?.trim() || ''
-    if (!realName) continue
-    const email = u.email?.trim().toLowerCase()
-    const name = u.name?.trim().toLowerCase()
-    if (email) {
-      const res = await env.TEAM_DB.prepare(
-        'UPDATE users SET display_name = ?1, updated_at = CURRENT_TIMESTAMP WHERE lower(email) = ?2',
-      )
-        .bind(realName, email)
-        .run()
-      if (res.meta.changes > 0) synced++
-    }
-    if (name) {
-      const res = await env.TEAM_DB.prepare(
-        'UPDATE users SET display_name = ?1, updated_at = CURRENT_TIMESTAMP WHERE lower(email) LIKE ?2 AND display_name = email',
-      )
-        .bind(realName, `${name}@%`)
-        .run()
-      if (res.meta.changes > 0) synced++
-    }
-  }
-
-  return { synced, total: data.data.length }
-}
-
 async function handleAdminUsers(request: Request, env: Env, identity: JWTPayload, currentUser: UserRow) {
   await requireAdmin(identity, env)
   const url = new URL(request.url)
@@ -1171,13 +1079,6 @@ async function handleAdminUsers(request: Request, env: Env, identity: JWTPayload
       'SELECT COUNT(*) AS n FROM tailscale_devices WHERE online=0 AND revoked_at IS NULL',
     ).first<{ n: number }>()
     return json({ users, offlineDeviceCount: Number(offlineCount?.n ?? 0) })
-  }
-  if (request.method === 'POST' && url.pathname.endsWith('/sync-casdoor')) {
-    const body = await parseJsonBody(request).catch(() => ({} as Record<string, unknown>))
-    const endpoint = typeof body.endpoint === 'string' ? body.endpoint : undefined
-    const org = typeof body.org === 'string' ? body.org : undefined
-    const outcome = await syncFromCasdoor(env, endpoint, undefined, undefined, org)
-    return json({ ok: true, ...outcome })
   }
   const match = url.pathname.match(/^\/v1\/admin\/users\/([^/]+)(?:\/role)?$/)
   if (request.method === 'PATCH' && match) {
