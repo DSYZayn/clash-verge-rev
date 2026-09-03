@@ -51,6 +51,9 @@ const TAILSCALE_VALIDATE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Refresh the server-side device record often enough for a remote role/tag
 /// change to become visible, while keeping ordinary status reads local.
 const TAILSCALE_RECONCILE_INTERVAL_SECONDS: u64 = 15;
+/// Tagged devices cannot renew their node identity interactively. Rotate the
+/// team-managed enrollment before the finite device key reaches its deadline.
+const TAILSCALE_DEVICE_KEY_RENEWAL_WINDOW_SECONDS: u64 = 60 * 60;
 const TAILSCALE_RELEASES_URL: &str = "https://api.github.com/repos/tailscale/tailscale/releases/latest";
 const TAILSCALE_RELEASES_PAGE_URL: &str = "https://github.com/tailscale/tailscale/releases/latest";
 const CLOUDFLARE_RELEASES_URL: &str = "https://developers.cloudflare.com/cloudflare-one/team-and-resources/devices/cloudflare-one-client/download/index.md";
@@ -74,6 +77,7 @@ static TEAM_HTTP_CLIENT: once_cell::sync::Lazy<reqwest::Client> = once_cell::syn
 // reload the session after waiting so concurrent account/status calls cannot
 // redeem the same token or overwrite a newer token on disk.
 static SESSION_REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static TAILSCALE_CONNECTION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 // Keep session writes serialized and replace the encrypted blob atomically.
 // Background account/profile updates otherwise can overlap on Windows, where
 // a reader may observe a partially truncated file during `fs::write`.
@@ -200,6 +204,8 @@ pub struct TailscaleInfo {
     pub node_id: Option<String>,
     pub key_issued_at: Option<u64>,
     pub key_expires_at: Option<u64>,
+    #[serde(default)]
+    pub device_key_expires_at: Option<u64>,
     pub role: Option<String>,
     pub tag: Option<String>,
     #[serde(default)]
@@ -242,6 +248,8 @@ pub struct TailscaleStatus {
     pub addresses: Vec<String>,
     pub key_issued_at: Option<u64>,
     pub key_expires_at: Option<u64>,
+    pub device_key_expires_at: Option<u64>,
+    pub key_expired: bool,
     pub role: Option<String>,
     pub tag: Option<String>,
     pub profiles: Vec<TailscaleProfile>,
@@ -418,6 +426,10 @@ struct TailscaleNode {
     ips: Vec<String>,
     #[serde(rename = "Online")]
     online: Option<bool>,
+    #[serde(rename = "Expired", default)]
+    expired: bool,
+    #[serde(rename = "KeyExpiry")]
+    key_expiry: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -924,9 +936,19 @@ async fn tailscale_status_snapshot_with_profiles(include_profiles: bool) -> Tail
         result.running = true;
         match serde_json::from_slice::<TailscaleStatusJson>(&status.stdout) {
             Ok(value) => {
+                let backend_running = value.backend_state.as_deref() == Some("Running");
                 result.running = value.backend_state.as_deref().is_none_or(|state| state != "Stopped");
-                result.logged_in = value.backend_state.as_deref() == Some("Running") && value.self_node.is_some();
                 if let Some(node) = value.self_node {
+                    result.device_key_expires_at = node
+                        .key_expiry
+                        .as_deref()
+                        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                        .and_then(|value| u64::try_from(value.timestamp()).ok());
+                    result.key_expired = node.expired
+                        || result
+                            .device_key_expires_at
+                            .is_some_and(|expires_at| expires_at <= now());
+                    result.logged_in = backend_running && !result.key_expired;
                     result.node_id = node.id;
                     result.device_name = node.hostname.or(node.dns_name);
                     result.addresses = node.ips;
@@ -935,7 +957,7 @@ async fn tailscale_status_snapshot_with_profiles(include_profiles: bool) -> Tail
                         .iter()
                         .find(|ip| ip.parse::<std::net::Ipv4Addr>().is_ok())
                         .cloned();
-                    result.online = node.online.unwrap_or(result.logged_in);
+                    result.online = !result.key_expired && node.online.unwrap_or(result.logged_in);
                 }
             }
             Err(error) => {
@@ -1711,11 +1733,29 @@ async fn save_tailscale_reconcile(response: TailscaleReconcileResponse, node_id:
         node_id: node_id.or(previous.node_id),
         key_issued_at: previous.key_issued_at,
         key_expires_at: previous.key_expires_at,
+        device_key_expires_at: previous.device_key_expires_at,
         role: response.role.or(previous.role),
         tag: response.tag.or(previous.tag),
         last_reconciled_at: Some(now()),
     });
     save_session(&session)
+}
+
+fn tailscale_device_key_needs_renewal(snapshot: &TailscaleStatus) -> bool {
+    snapshot.key_expired
+        || snapshot
+            .device_key_expires_at
+            .is_some_and(|expires_at| expires_at <= now().saturating_add(TAILSCALE_DEVICE_KEY_RENEWAL_WINDOW_SECONDS))
+}
+
+fn is_current_team_tailscale_node(snapshot: &TailscaleStatus, session: &Option<TeamSession>) -> bool {
+    snapshot.node_id.as_deref().is_some_and(|node_id| {
+        session
+            .as_ref()
+            .and_then(|value| value.tailscale.as_ref())
+            .and_then(|value| value.node_id.as_deref())
+            .is_some_and(|managed_node_id| managed_node_id == node_id)
+    })
 }
 
 fn invalidate_tailscale_reconcile() {
@@ -2055,6 +2095,26 @@ pub async fn status() -> Result<TeamStatus> {
     // The two local network clients are independent. Probe them together so a
     // slow WARP trace does not add its latency to every Tailscale status read.
     let (mut tailscale, cloudflare_one) = tokio::join!(tailscale_status_snapshot(), cloudflare_one_status_snapshot(),);
+    if !cloudflare_one.connected
+        && is_current_team_tailscale_node(&tailscale, &session)
+        && tailscale_device_key_needs_renewal(&tailscale)
+    {
+        match ensure_tailscale_team_connection().await {
+            Ok(()) => {
+                tailscale = tailscale_status_snapshot().await;
+                session = load_session()?;
+            }
+            Err(error) => {
+                logging!(
+                    warn,
+                    Type::Config,
+                    "automatic Tailscale device key renewal failed: {error:#}"
+                );
+                tailscale = tailscale_status_snapshot().await;
+                session = load_session()?;
+            }
+        }
+    }
     let netcheck_cache = NETCHECK_CACHE.lock().clone();
     if let Some((checked_at, netcheck)) = netcheck_cache {
         tailscale.netcheck = Some(netcheck);
@@ -2104,6 +2164,9 @@ pub async fn status() -> Result<TeamStatus> {
         }
         tailscale.key_issued_at = info.key_issued_at;
         tailscale.key_expires_at = info.key_expires_at;
+        if tailscale.device_key_expires_at.is_none() {
+            tailscale.device_key_expires_at = info.device_key_expires_at;
+        }
         tailscale.role = info.role.clone();
         tailscale.tag = info.tag.clone();
     }
@@ -2274,30 +2337,43 @@ async fn issue_tailscale_key(device_id: &str, hostname: &str) -> Result<Tailscal
     Ok(issued)
 }
 
-/// Right after `tailscale up` the backend is still Starting and Self.ID is
-/// absent; poll until the node identity shows up (or give up after ~10s).
-async fn wait_for_node_identity() -> TailscaleStatus {
+/// Wait until `tailscale up` publishes a usable identity. During renewal the
+/// old Self record can linger briefly, so also require a changed node or a
+/// later device-key deadline.
+async fn wait_for_node_identity(
+    previous_node_id: Option<&str>,
+    previous_key_expires_at: Option<u64>,
+) -> Result<TailscaleStatus> {
     let mut snapshot = tailscale_status_snapshot_fast().await;
     for _ in 0..20 {
-        if snapshot.node_id.is_some() {
-            break;
+        let node_changed = snapshot
+            .node_id
+            .as_deref()
+            .is_some_and(|node_id| previous_node_id.is_none_or(|previous_node_id| previous_node_id != node_id));
+        let key_renewed = snapshot.device_key_expires_at.is_some_and(|expires_at| {
+            previous_key_expires_at.is_none_or(|previous_expires_at| expires_at > previous_expires_at)
+        });
+        if snapshot.logged_in
+            && snapshot.node_id.is_some()
+            && (previous_node_id.is_none() || node_changed || key_renewed)
+        {
+            return Ok(snapshot);
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         snapshot = tailscale_status_snapshot_fast().await;
     }
-    snapshot
+    bail!("Tailscale did not publish a renewed device identity")
 }
-pub async fn tailscale_connect() -> Result<TeamStatus> {
-    if cloudflare_one_status_snapshot().await.connected {
-        bail!("Tailscale 与 Cloudflare One Client 不能同时连接，请先断开 Cloudflare One Client");
-    }
+
+async fn ensure_tailscale_team_connection() -> Result<()> {
+    let _connection_guard = TAILSCALE_CONNECTION_LOCK.lock().await;
     let device_id = device_id()?;
     let before = tailscale_status_snapshot_fast().await;
-    if before.logged_in && before.node_id.is_some() {
+    if before.logged_in && before.node_id.is_some() && !tailscale_device_key_needs_renewal(&before) {
         let node_id = before.node_id.clone();
         let response = tailscale_reconcile(&device_id, &before).await?;
         save_tailscale_reconcile(response, node_id).await?;
-        return status().await;
+        return Ok(());
     }
     let hostname = before
         .device_name
@@ -2305,18 +2381,17 @@ pub async fn tailscale_connect() -> Result<TeamStatus> {
         .or_else(|| gethostname::gethostname().into_string().ok())
         .filter(|value| !value.trim().is_empty());
     let hostname = hostname.context("unable to determine the Tailscale hostname")?;
-    // Mint a fresh key per attempt (keys are single-use). The retry first
-    // logs out to clear stale server-side node state - e.g. an ephemeral node
-    // deleted while offline - which otherwise makes `tailscale up` exit 1.
+    // Obtain the replacement before disconnecting a still-working node. Each
+    // retry mints a fresh key because enrollment keys are single-use.
     let mut up_error = None;
     for attempt in 0..2 {
-        if attempt > 0 {
+        let issued = issue_tailscale_key(&device_id, &hostname).await?;
+        if before.node_id.is_some() || attempt > 0 {
             let _ = tailscale_output(&["logout"]).await;
         }
-        let issued = issue_tailscale_key(&device_id, &hostname).await?;
         match tailscale_up(&issued.key).await {
             Ok(()) => {
-                let after = wait_for_node_identity().await;
+                let after = wait_for_node_identity(before.node_id.as_deref(), before.device_key_expires_at).await?;
                 let node_id = after
                     .node_id
                     .clone()
@@ -2327,17 +2402,26 @@ pub async fn tailscale_connect() -> Result<TeamStatus> {
                     node_id: Some(node_id),
                     key_issued_at: issued.issued_at,
                     key_expires_at: issued.expires_at,
+                    device_key_expires_at: after.device_key_expires_at,
                     role: reconcile.role.or(issued.role),
                     tag: reconcile.tag.or(issued.tag),
                     last_reconciled_at: Some(now()),
                 });
                 save_session(&session)?;
-                return status().await;
+                return Ok(());
             }
             Err(error) => up_error = Some(error),
         }
     }
     Err(up_error.unwrap_or_else(|| anyhow::anyhow!("tailscale up failed")))
+}
+
+pub async fn tailscale_connect() -> Result<TeamStatus> {
+    if cloudflare_one_status_snapshot().await.connected {
+        bail!("Tailscale 与 Cloudflare One Client 不能同时连接，请先断开 Cloudflare One Client");
+    }
+    ensure_tailscale_team_connection().await?;
+    status().await
 }
 
 pub async fn tailscale_switch_account(account: &str) -> Result<TeamStatus> {

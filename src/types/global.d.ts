@@ -312,6 +312,8 @@ interface ITailscaleStatus {
   addresses: string[]
   keyIssuedAt?: number
   keyExpiresAt?: number
+  deviceKeyExpiresAt?: number
+  keyExpired?: boolean
   role?: string
   tag?: string
   profiles?: ITailscaleProfile[]

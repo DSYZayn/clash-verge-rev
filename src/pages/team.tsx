@@ -10,7 +10,6 @@ import NetworkCheckOutlinedIcon from '@mui/icons-material/NetworkCheckOutlined'
 import PersonOutlineOutlinedIcon from '@mui/icons-material/PersonOutlineOutlined'
 import PlayArrowOutlinedIcon from '@mui/icons-material/PlayArrowOutlined'
 import RefreshOutlinedIcon from '@mui/icons-material/RefreshOutlined'
-import { open as openUrl } from '@tauri-apps/plugin-shell'
 import {
   Alert,
   Box,
@@ -30,6 +29,7 @@ import {
   Switch,
   Typography,
 } from '@mui/material'
+import { open as openUrl } from '@tauri-apps/plugin-shell'
 import dayjs from 'dayjs'
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router'
@@ -441,6 +441,15 @@ const TeamPage = () => {
               </Alert>
             )}
 
+            {tailscale?.installed &&
+              tailscaleRunning !== false &&
+              tailscale.keyExpired && (
+                <Alert severity="error" sx={{ mt: 2 }}>
+                  Tailscale 设备密钥已过期，团队权限不可用。请重新连接；若 Team
+                  会话仍有效，应用会直接按当前角色领取新密钥，无需重登团队账号。
+                </Alert>
+              )}
+
             {tailscale?.installed && tailscale.loggedIn && (
               <>
                 <Divider sx={{ my: 2 }} />
@@ -455,8 +464,13 @@ const TeamPage = () => {
                     {tailscale.tag || '未提供'}
                   </Typography>
                   <Typography variant="body2" color="text.secondary">
-                    Key 签发：{tailscaleDate(tailscale.keyIssuedAt)}；有效期至：
+                    入网 Key 签发：{tailscaleDate(tailscale.keyIssuedAt)}
+                    ；领取期限：
                     {tailscaleDate(tailscale.keyExpiresAt)}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    设备密钥有效期至：
+                    {tailscaleDate(tailscale.deviceKeyExpiresAt)}
                   </Typography>
                 </Stack>
               </>
@@ -625,7 +639,7 @@ const TeamPage = () => {
                     }
                   }}
                 >
-                  连接
+                  {tailscale.keyExpired ? '重新连接' : '连接'}
                 </Button>
               ) : tailscale?.installed &&
                 tailscaleRunning !== false &&
