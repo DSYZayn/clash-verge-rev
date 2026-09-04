@@ -252,7 +252,7 @@ impl NetworkManager {
         let proxy_url: Option<std::string::String> = match proxy_type {
             ProxyType::None => None,
             ProxyType::Localhost => {
-                let port = MixedPort::desired().await;
+                let port = MixedPort::effective().await;
                 Some(format!("http://127.0.0.1:{port}"))
             }
             ProxyType::System => {

@@ -251,10 +251,27 @@ const TeamPage = () => {
   const tailscaleRunning = tailscale?.running
   const cloudflareOne =
     data?.cloudflareOne ?? data?.cloudflareOneClient ?? data?.cloudflare
-  const cloudflareLocationMatch = cloudflareOne?.locationMatch
-  const cloudflareLocalLocationMatch = cloudflareOne?.localLocationMatch
+  const cloudflareLocationMatch =
+    typeof cloudflareOne?.locationMatch === 'boolean'
+      ? cloudflareOne.locationMatch
+      : undefined
+  const cloudflareLocalLocationMatch =
+    typeof cloudflareOne?.localLocationMatch === 'boolean'
+      ? cloudflareOne.localLocationMatch
+      : undefined
+  const cloudflareWarpEnabled =
+    typeof cloudflareOne?.warpEnabled === 'boolean'
+      ? cloudflareOne.warpEnabled
+      : undefined
   const cloudflareLocationVerified =
     cloudflareLocationMatch === true || cloudflareLocalLocationMatch === true
+  const cloudflareHasLocationComparison =
+    cloudflareLocationMatch !== undefined ||
+    cloudflareLocalLocationMatch !== undefined
+  const cloudflareHasLocationBaseline = Boolean(
+    cloudflareOne?.clashTunLocation || cloudflareOne?.localNetworkLocation,
+  )
+  const cloudflareTraceBypassesWarp = cloudflareWarpEnabled === false
   const tailscaleDate = (value?: number) =>
     value ? dayjs(value * 1000).format('YYYY-MM-DD HH:mm') : '未提供'
 
@@ -853,6 +870,14 @@ const TeamPage = () => {
                         .join(' / ') || '位置未知'}
                     </Typography>
                   )}
+                  {cloudflareWarpEnabled !== undefined && (
+                    <Typography variant="body2" color="text.secondary">
+                      Cloudflare 路由：
+                      {cloudflareWarpEnabled
+                        ? 'WARP 已接管'
+                        : '当前探针未经过 WARP'}
+                    </Typography>
+                  )}
                   {cloudflareOne.clashTunLocation && (
                     <Typography variant="body2" color="text.secondary">
                       Clash TUN 节点位置：{cloudflareOne.clashTunLocation}
@@ -866,6 +891,30 @@ const TeamPage = () => {
                 </Stack>
               </>
             )}
+
+            {cloudflareOne?.connected && cloudflareTraceBypassesWarp && (
+              <Alert severity="warning" sx={{ mt: 2 }}>
+                当前 Cloudflare 探针未经过
+                WARP，位置一致性暂无法有效判断。请检查 Cloudflare One Client
+                的模式和路由规则后重新检测。
+              </Alert>
+            )}
+            {cloudflareOne?.connected &&
+              !cloudflareTraceBypassesWarp &&
+              !cloudflareHasLocationBaseline && (
+                <Alert severity="info" sx={{ mt: 2 }}>
+                  尚未采集连接前的位置基线。请先断开并重新连接 Cloudflare One
+                  Client，再点击“检测出口”。
+                </Alert>
+              )}
+            {cloudflareOne?.connected &&
+              !cloudflareTraceBypassesWarp &&
+              cloudflareHasLocationBaseline &&
+              !cloudflareHasLocationComparison && (
+                <Alert severity="info" sx={{ mt: 2 }}>
+                  当前探针与连接前基线没有可比较的位置字段，暂不判定一致性。
+                </Alert>
+              )}
 
             {cloudflareOne?.installed && cloudflareOne.running === false && (
               <Alert severity="warning" sx={{ mt: 2 }}>
@@ -960,60 +1009,72 @@ const TeamPage = () => {
               </Box>
             </Stack>
 
-            {cloudflareOne?.connected &&
-              (cloudflareLocationMatch !== undefined ||
-                cloudflareLocalLocationMatch !== undefined) && (
-                <Stack spacing={1} sx={{ mt: 2 }}>
+            {cloudflareOne?.connected && cloudflareHasLocationComparison && (
+              <Stack spacing={1} sx={{ mt: 2 }}>
+                <Alert
+                  severity={cloudflareLocationVerified ? 'success' : 'error'}
+                  icon={
+                    cloudflareLocationVerified ? (
+                      <CheckCircleOutlineOutlinedIcon fontSize="inherit" />
+                    ) : (
+                      <ErrorOutlineOutlinedIcon fontSize="inherit" />
+                    )
+                  }
+                >
+                  {cloudflareLocationVerified
+                    ? '出口节点位置校验通过（Clash TUN 或本机网络至少一项匹配）。'
+                    : '出口节点位置校验未通过，请检查 TUN、节点选择和 Cloudflare One Client 路由。'}
+                </Alert>
+                {cloudflareLocationMatch !== undefined && (
                   <Alert
-                    severity={cloudflareLocationVerified ? 'success' : 'error'}
+                    severity={
+                      cloudflareLocationMatch
+                        ? 'success'
+                        : cloudflareLocationVerified
+                          ? 'info'
+                          : 'error'
+                    }
                     icon={
-                      cloudflareLocationVerified ? (
+                      cloudflareLocationMatch ? (
                         <CheckCircleOutlineOutlinedIcon fontSize="inherit" />
                       ) : (
                         <ErrorOutlineOutlinedIcon fontSize="inherit" />
                       )
                     }
                   >
-                    {cloudflareLocationVerified
-                      ? '出口节点位置校验通过（Clash TUN 或本机网络至少一项匹配）。'
-                      : '出口节点位置校验未通过，请检查 TUN、节点选择和 Cloudflare One Client 路由。'}
-                  </Alert>
-                  {cloudflareLocationMatch !== undefined && (
-                    <Alert
-                      severity={cloudflareLocationMatch ? 'success' : 'error'}
-                      icon={
-                        cloudflareLocationMatch ? (
-                          <CheckCircleOutlineOutlinedIcon fontSize="inherit" />
-                        ) : (
-                          <ErrorOutlineOutlinedIcon fontSize="inherit" />
-                        )
-                      }
-                    >
-                      {cloudflareLocationMatch
-                        ? 'Clash TUN 节点与 Cloudflare 出口位置一致。'
+                    {cloudflareLocationMatch
+                      ? 'Clash TUN 节点与 Cloudflare 出口位置一致。'
+                      : cloudflareLocationVerified
+                        ? 'Clash TUN 节点与 Cloudflare 出口位置不同，但另一条基线已匹配。'
                         : 'Clash TUN 节点与 Cloudflare 出口位置不一致。'}
-                    </Alert>
-                  )}
-                  {cloudflareLocalLocationMatch !== undefined && (
-                    <Alert
-                      severity={
-                        cloudflareLocalLocationMatch ? 'success' : 'error'
-                      }
-                      icon={
-                        cloudflareLocalLocationMatch ? (
-                          <CheckCircleOutlineOutlinedIcon fontSize="inherit" />
-                        ) : (
-                          <ErrorOutlineOutlinedIcon fontSize="inherit" />
-                        )
-                      }
-                    >
-                      {cloudflareLocalLocationMatch
-                        ? '本机网络与 Cloudflare 出口位置一致。'
+                  </Alert>
+                )}
+                {cloudflareLocalLocationMatch !== undefined && (
+                  <Alert
+                    severity={
+                      cloudflareLocalLocationMatch
+                        ? 'success'
+                        : cloudflareLocationVerified
+                          ? 'info'
+                          : 'error'
+                    }
+                    icon={
+                      cloudflareLocalLocationMatch ? (
+                        <CheckCircleOutlineOutlinedIcon fontSize="inherit" />
+                      ) : (
+                        <ErrorOutlineOutlinedIcon fontSize="inherit" />
+                      )
+                    }
+                  >
+                    {cloudflareLocalLocationMatch
+                      ? '本机网络与 Cloudflare 出口位置一致。'
+                      : cloudflareLocationVerified
+                        ? '本机网络与 Cloudflare 出口位置不同，但另一条基线已匹配。'
                         : '本机网络与 Cloudflare 出口位置不一致。'}
-                    </Alert>
-                  )}
-                </Stack>
-              )}
+                  </Alert>
+                )}
+              </Stack>
+            )}
 
             <Divider sx={{ my: 2 }} />
             <Stack

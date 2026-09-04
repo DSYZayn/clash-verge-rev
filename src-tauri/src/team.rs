@@ -1165,7 +1165,8 @@ fn first_value_after_label(text: &str, label: &str) -> Option<String> {
     let label = label.to_ascii_lowercase();
     text.lines().find_map(|line| {
         let (key, value) = line.split_once(':').or_else(|| line.split_once('='))?;
-        if key.trim().to_ascii_lowercase() != label {
+        let key = key.rsplit('\t').next().unwrap_or(key).trim();
+        if key.to_ascii_lowercase() != label {
             return None;
         }
         let value = value.trim();
@@ -1408,7 +1409,7 @@ struct CloudflareTrace {
 
 impl CloudflareTrace {
     const fn has_location(&self) -> bool {
-        self.country.is_some() || self.colo.is_some()
+        self.ip.is_some() || self.country.is_some() || self.colo.is_some()
     }
 
     fn location_label(&self) -> Option<String> {
@@ -1416,18 +1417,30 @@ impl CloudflareTrace {
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
-        (!parts.is_empty()).then(|| parts.join(" / "))
+        if !parts.is_empty() {
+            return Some(parts.join(" / "));
+        }
+        self.ip.clone()
     }
 
     fn location_matches(&self, other: &Self) -> Option<bool> {
-        match (self.colo.as_deref(), other.colo.as_deref()) {
-            (Some(left), Some(right)) => Some(left.eq_ignore_ascii_case(right)),
-            _ => self
-                .country
-                .as_deref()
-                .zip(other.country.as_deref())
-                .map(|(left, right)| left.eq_ignore_ascii_case(right)),
+        // A colo is the most specific value. If both probes expose one, a
+        // different colo is a real mismatch even when the country is equal.
+        if let (Some(left), Some(right)) = (self.colo.as_deref(), other.colo.as_deref()) {
+            return Some(left.eq_ignore_ascii_case(right));
         }
+        if let (Some(left), Some(right)) = (self.country.as_deref(), other.country.as_deref()) {
+            return Some(left.eq_ignore_ascii_case(right));
+        }
+        if self.country.is_none()
+            && self.colo.is_none()
+            && other.country.is_none()
+            && other.colo.is_none()
+            && let (Some(left), Some(right)) = (self.ip.as_deref(), other.ip.as_deref())
+        {
+            return Some(left.eq_ignore_ascii_case(right));
+        }
+        None
     }
 }
 
@@ -1454,6 +1467,27 @@ async fn cloudflare_trace_with_proxy(proxy_type: ProxyType) -> Result<Cloudflare
 
 async fn cloudflare_trace() -> Result<CloudflareTrace> {
     cloudflare_trace_with_proxy(ProxyType::None).await
+}
+
+fn clear_cloudflare_location_baselines() {
+    *CLASH_TUN_LOCATION.lock() = None;
+    *LOCAL_NETWORK_LOCATION.lock() = None;
+}
+
+async fn capture_cloudflare_location_baselines() {
+    let tun_enabled = Config::verge().await.latest_arc().enable_tun_mode.unwrap_or(false);
+    clear_cloudflare_location_baselines();
+    if !tun_enabled {
+        return;
+    }
+    let (local_result, clash_result) = tokio::join!(
+        cloudflare_trace_with_proxy(ProxyType::None),
+        cloudflare_trace_with_proxy(ProxyType::Localhost),
+    );
+    let local_location = local_result.ok().filter(CloudflareTrace::has_location);
+    let clash_location = clash_result.ok().filter(CloudflareTrace::has_location);
+    *LOCAL_NETWORK_LOCATION.lock() = local_location;
+    *CLASH_TUN_LOCATION.lock() = clash_location;
 }
 
 async fn cloudflare_one_status_snapshot() -> CloudflareOneStatus {
@@ -1511,16 +1545,28 @@ async fn cloudflare_one_status_snapshot() -> CloudflareOneStatus {
     }
     match cloudflare_trace().await {
         Ok(trace) => {
-            let clash_location = CLASH_TUN_LOCATION.lock().clone();
-            let local_location = LOCAL_NETWORK_LOCATION.lock().clone();
+            let tun_enabled = Config::verge().await.latest_arc().enable_tun_mode.unwrap_or(false);
+            if !tun_enabled {
+                clear_cloudflare_location_baselines();
+            }
+            let clash_location = tun_enabled.then(|| CLASH_TUN_LOCATION.lock().clone()).flatten();
+            let local_location = tun_enabled.then(|| LOCAL_NETWORK_LOCATION.lock().clone()).flatten();
             result.clash_tun_location = clash_location.as_ref().and_then(CloudflareTrace::location_label);
-            result.location_match = clash_location
-                .as_ref()
-                .and_then(|baseline| baseline.location_matches(&trace));
+            result.location_match = (trace.warp_enabled != Some(false))
+                .then(|| {
+                    clash_location
+                        .as_ref()
+                        .and_then(|baseline| baseline.location_matches(&trace))
+                })
+                .flatten();
             result.local_network_location = local_location.as_ref().and_then(CloudflareTrace::location_label);
-            result.local_location_match = local_location
-                .as_ref()
-                .and_then(|baseline| baseline.location_matches(&trace));
+            result.local_location_match = (trace.warp_enabled != Some(false))
+                .then(|| {
+                    local_location
+                        .as_ref()
+                        .and_then(|baseline| baseline.location_matches(&trace))
+                })
+                .flatten();
             result.exit_ip = trace.ip;
             result.exit_country = trace.country;
             result.exit_colo = trace.colo;
@@ -2289,21 +2335,15 @@ async fn cloudflare_one_command(action: &str) -> Result<CloudflareOneStatus> {
         // the user's local-network location; the explicit localhost proxy
         // request captures the route selected by Clash TUN when available.
         let current_status = warp_cli_output(&program, &["status"]).await;
-        let currently_connected = current_status
-            .as_ref()
-            .is_ok_and(|output| output.status.success() && parse_warp_connected(&warp_cli_text(output)));
-        if !currently_connected {
-            let (local_result, clash_result) = tokio::join!(
-                cloudflare_trace_with_proxy(ProxyType::None),
-                cloudflare_trace_with_proxy(ProxyType::Localhost),
-            );
-            let local_location = local_result.ok().filter(CloudflareTrace::has_location);
-            let clash_location = clash_result
-                .ok()
-                .filter(CloudflareTrace::has_location)
-                .or_else(|| local_location.clone());
-            *LOCAL_NETWORK_LOCATION.lock() = local_location;
-            *CLASH_TUN_LOCATION.lock() = clash_location;
+        match current_status {
+            Ok(output) if output.status.success() => {
+                if parse_warp_connected(&warp_cli_text(&output)) {
+                    clear_cloudflare_location_baselines();
+                } else {
+                    capture_cloudflare_location_baselines().await;
+                }
+            }
+            _ => clear_cloudflare_location_baselines(),
         }
     }
 
@@ -2333,8 +2373,7 @@ pub async fn refresh_cloudflare_one() -> Result<TeamStatus> {
 
 pub async fn disconnect_cloudflare_one() -> Result<TeamStatus> {
     cloudflare_one_command("disconnect").await?;
-    *CLASH_TUN_LOCATION.lock() = None;
-    *LOCAL_NETWORK_LOCATION.lock() = None;
+    clear_cloudflare_location_baselines();
     status().await
 }
 
@@ -2733,6 +2772,14 @@ mod cloudflare_location_tests {
     use super::*;
 
     #[test]
+    fn parses_mode_from_warp_settings_output() {
+        assert_eq!(
+            first_value_after_label("(network policy)\tMode: WarpWithDnsOverHttps", "mode").as_deref(),
+            Some("WarpWithDnsOverHttps"),
+        );
+    }
+
+    #[test]
     fn matches_the_same_cloudflare_colo() {
         let direct = parse_cloudflare_trace("colo=MFM\n");
         let warp = parse_cloudflare_trace("loc=MO\ncolo=MFM\n");
@@ -2742,9 +2789,42 @@ mod cloudflare_location_tests {
     }
 
     #[test]
-    fn prioritizes_colo_over_country() {
+    fn rejects_same_country_when_cloudflare_uses_another_colo() {
         let direct = parse_cloudflare_trace("loc=US\ncolo=SJC\n");
         let warp = parse_cloudflare_trace("loc=US\ncolo=LAX\n");
+
+        assert_eq!(direct.location_matches(&warp), Some(false));
+    }
+
+    #[test]
+    fn matches_by_ip_when_location_labels_differ() {
+        let direct = parse_cloudflare_trace("ip=203.0.113.10\n");
+        let warp = parse_cloudflare_trace("ip=203.0.113.10\n");
+
+        assert!(direct.has_location());
+        assert_eq!(direct.location_matches(&warp), Some(true));
+    }
+
+    #[test]
+    fn reports_no_match_when_no_shared_location_field_exists() {
+        let direct = parse_cloudflare_trace("colo=MFM\n");
+        let warp = parse_cloudflare_trace("loc=MO\n");
+
+        assert_eq!(direct.location_matches(&warp), None);
+    }
+
+    #[test]
+    fn does_not_use_ip_when_a_probe_has_location_data() {
+        let direct = parse_cloudflare_trace("ip=203.0.113.10\n");
+        let warp = parse_cloudflare_trace("ip=203.0.113.11\nloc=MO\ncolo=MFM\n");
+
+        assert_eq!(direct.location_matches(&warp), None);
+    }
+
+    #[test]
+    fn rejects_different_country_and_colo() {
+        let direct = parse_cloudflare_trace("loc=HK\ncolo=HKG\n");
+        let warp = parse_cloudflare_trace("loc=MO\ncolo=MFM\n");
 
         assert_eq!(direct.location_matches(&warp), Some(false));
     }

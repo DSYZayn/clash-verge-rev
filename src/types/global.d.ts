@@ -350,15 +350,15 @@ interface ICloudflareOneStatus {
   exitColo?: string
   exitRegion?: string
   exitCity?: string
-  warpEnabled?: boolean
+  warpEnabled?: boolean | null
   /** Location observed through the Clash TUN route. */
   clashTunLocation?: string
-  /** Explicit comparison result from the backend, when available. */
-  locationMatch?: boolean
+  /** Comparison result from the backend when a baseline and WARP route exist. */
+  locationMatch?: boolean | null
   /** Location observed through the local network before WARP connected. */
   localNetworkLocation?: string
-  /** Whether the WARP exit country matches the local-network location. */
-  localLocationMatch?: boolean
+  /** Whether the WARP exit matches the local-network baseline. */
+  localLocationMatch?: boolean | null
   checkedAt?: number
   lastCheckedAt?: number
   error?: string
