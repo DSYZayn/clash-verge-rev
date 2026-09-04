@@ -351,6 +351,7 @@ interface ICloudflareOneStatus {
   exitRegion?: string
   exitCity?: string
   warpEnabled?: boolean | null
+  warpTunnelColo?: string | null
   /** Location observed through the Clash TUN route. */
   clashTunLocation?: string
   /** Comparison result from the backend when a baseline and WARP route exist. */

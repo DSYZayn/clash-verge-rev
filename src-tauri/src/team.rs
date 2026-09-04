@@ -301,6 +301,7 @@ pub struct CloudflareOneStatus {
     pub exit_city: Option<String>,
     pub exit_colo: Option<String>,
     pub warp_enabled: Option<bool>,
+    pub warp_tunnel_colo: Option<String>,
     pub clash_tun_location: Option<String>,
     pub location_match: Option<bool>,
     pub local_network_location: Option<String>,
@@ -1190,6 +1191,10 @@ fn parse_warp_connected(text: &str) -> bool {
     connected
 }
 
+fn parse_warp_tunnel_colo(text: &str) -> Option<String> {
+    first_value_after_label(text, "colo").and_then(|value| value.split_whitespace().next().map(str::to_owned))
+}
+
 fn parse_warp_version(text: &str) -> Option<String> {
     text.lines()
         .map(str::trim)
@@ -1469,6 +1474,17 @@ async fn cloudflare_trace() -> Result<CloudflareTrace> {
     cloudflare_trace_with_proxy(ProxyType::None).await
 }
 
+fn cloudflare_location_trace(trace: &CloudflareTrace, tunnel_colo: Option<&str>) -> Option<CloudflareTrace> {
+    if trace.warp_enabled != Some(false) {
+        return Some(trace.clone());
+    }
+    tunnel_colo.map(|colo| CloudflareTrace {
+        colo: Some(colo.to_string()),
+        warp_enabled: Some(true),
+        ..CloudflareTrace::default()
+    })
+}
+
 fn clear_cloudflare_location_baselines() {
     *CLASH_TUN_LOCATION.lock() = None;
     *LOCAL_NETWORK_LOCATION.lock() = None;
@@ -1543,6 +1559,12 @@ async fn cloudflare_one_status_snapshot() -> CloudflareOneStatus {
     if !result.running || !result.connected {
         return result;
     }
+    let tunnel_colo = warp_cli_output(&program, &["tunnel", "stats"])
+        .await
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| parse_warp_tunnel_colo(&warp_cli_text(&output)));
+    result.warp_tunnel_colo = tunnel_colo.clone();
     match cloudflare_trace().await {
         Ok(trace) => {
             let tun_enabled = Config::verge().await.latest_arc().enable_tun_mode.unwrap_or(false);
@@ -1551,22 +1573,19 @@ async fn cloudflare_one_status_snapshot() -> CloudflareOneStatus {
             }
             let clash_location = tun_enabled.then(|| CLASH_TUN_LOCATION.lock().clone()).flatten();
             let local_location = tun_enabled.then(|| LOCAL_NETWORK_LOCATION.lock().clone()).flatten();
+            let location_trace = cloudflare_location_trace(&trace, tunnel_colo.as_deref());
             result.clash_tun_location = clash_location.as_ref().and_then(CloudflareTrace::location_label);
-            result.location_match = (trace.warp_enabled != Some(false))
-                .then(|| {
-                    clash_location
-                        .as_ref()
-                        .and_then(|baseline| baseline.location_matches(&trace))
-                })
-                .flatten();
+            result.location_match = location_trace.as_ref().and_then(|route| {
+                clash_location
+                    .as_ref()
+                    .and_then(|baseline| baseline.location_matches(route))
+            });
             result.local_network_location = local_location.as_ref().and_then(CloudflareTrace::location_label);
-            result.local_location_match = (trace.warp_enabled != Some(false))
-                .then(|| {
-                    local_location
-                        .as_ref()
-                        .and_then(|baseline| baseline.location_matches(&trace))
-                })
-                .flatten();
+            result.local_location_match = location_trace.as_ref().and_then(|route| {
+                local_location
+                    .as_ref()
+                    .and_then(|baseline| baseline.location_matches(route))
+            });
             result.exit_ip = trace.ip;
             result.exit_country = trace.country;
             result.exit_colo = trace.colo;
@@ -2776,6 +2795,25 @@ mod cloudflare_location_tests {
         assert_eq!(
             first_value_after_label("(network policy)\tMode: WarpWithDnsOverHttps", "mode").as_deref(),
             Some("WarpWithDnsOverHttps"),
+        );
+    }
+
+    #[test]
+    fn parses_colo_from_warp_tunnel_stats() {
+        assert_eq!(
+            parse_warp_tunnel_colo("Tunnel Protocol: MASQUE\nColo: MFM (140f18)\n").as_deref(),
+            Some("MFM"),
+        );
+    }
+
+    #[test]
+    fn uses_tunnel_colo_when_trace_bypasses_warp() {
+        let trace = parse_cloudflare_trace("loc=MO\ncolo=MFM\nwarp=off\n");
+        let baseline = parse_cloudflare_trace("colo=MFM\n");
+
+        assert!(
+            cloudflare_location_trace(&trace, Some("MFM"))
+                .is_some_and(|route| baseline.location_matches(&route) == Some(true))
         );
     }
 

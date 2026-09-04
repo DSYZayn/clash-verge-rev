@@ -263,6 +263,7 @@ const TeamPage = () => {
     typeof cloudflareOne?.warpEnabled === 'boolean'
       ? cloudflareOne.warpEnabled
       : undefined
+  const cloudflareWarpTunnelColo = cloudflareOne?.warpTunnelColo || undefined
   const cloudflareLocationVerified =
     cloudflareLocationMatch === true || cloudflareLocalLocationMatch === true
   const cloudflareHasLocationComparison =
@@ -875,7 +876,9 @@ const TeamPage = () => {
                       Cloudflare 路由：
                       {cloudflareWarpEnabled
                         ? 'WARP 已接管'
-                        : '当前探针未经过 WARP'}
+                        : cloudflareWarpTunnelColo
+                          ? `探针未经过 WARP；隧道节点 ${cloudflareWarpTunnelColo}`
+                          : '当前探针未经过 WARP'}
                     </Typography>
                   )}
                   {cloudflareOne.clashTunLocation && (
@@ -892,13 +895,15 @@ const TeamPage = () => {
               </>
             )}
 
-            {cloudflareOne?.connected && cloudflareTraceBypassesWarp && (
-              <Alert severity="warning" sx={{ mt: 2 }}>
-                当前 Cloudflare 探针未经过
-                WARP，位置一致性暂无法有效判断。请检查 Cloudflare One Client
-                的模式和路由规则后重新检测。
-              </Alert>
-            )}
+            {cloudflareOne?.connected &&
+              cloudflareTraceBypassesWarp &&
+              !cloudflareWarpTunnelColo && (
+                <Alert severity="warning" sx={{ mt: 2 }}>
+                  当前 Cloudflare 探针未经过
+                  WARP，位置一致性暂无法有效判断。请检查 Cloudflare One Client
+                  的模式和路由规则后重新检测。
+                </Alert>
+              )}
             {cloudflareOne?.connected &&
               !cloudflareTraceBypassesWarp &&
               !cloudflareHasLocationBaseline && (
